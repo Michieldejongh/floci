@@ -172,8 +172,20 @@ public class AppConfigService {
         profile.setDescription((String) request.get("Description"));
         profile.setLocationUri((String) request.get("LocationUri"));
         profile.setType((String) request.get("Type"));
+        profile.setRetrievalRoleArn((String) request.get("RetrievalRoleArn"));
+        applyKmsKeyIdentifier(profile, (String) request.get("KmsKeyIdentifier"));
         profileStore.put(profile.getId(), profile);
         return profile;
+    }
+
+    /**
+     * Stores the identifier as given and echoes it as {@code KmsKeyArn} when it already is a key
+     * ARN; an alias or bare key id would need a KMS lookup, so its ARN stays unset.
+     */
+    private static void applyKmsKeyIdentifier(ConfigurationProfile profile, String identifier) {
+        profile.setKmsKeyIdentifier(identifier);
+        profile.setKmsKeyArn(identifier != null && identifier.startsWith("arn:") && identifier.contains(":key/")
+                ? identifier : null);
     }
 
     public ConfigurationProfile getConfigurationProfile(String appId, String profileId) {
@@ -204,6 +216,12 @@ public class AppConfigService {
         }
         if (request.containsKey("Description")) {
             profile.setDescription((String) request.get("Description"));
+        }
+        if (request.containsKey("RetrievalRoleArn")) {
+            profile.setRetrievalRoleArn((String) request.get("RetrievalRoleArn"));
+        }
+        if (request.containsKey("KmsKeyIdentifier")) {
+            applyKmsKeyIdentifier(profile, (String) request.get("KmsKeyIdentifier"));
         }
         profileStore.put(profileId, profile);
         return profile;

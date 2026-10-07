@@ -19,6 +19,12 @@ public class ConfigurationProfile {
     private String locationUri;
     @JsonProperty("Type")
     private String type; // AWS.AppConfig.FeatureFlags, AWS.Freeform
+    @JsonProperty("RetrievalRoleArn")
+    private String retrievalRoleArn;
+    @JsonProperty("KmsKeyIdentifier")
+    private String kmsKeyIdentifier;
+    @JsonProperty("KmsKeyArn")
+    private String kmsKeyArn;
 
     public ConfigurationProfile() {}
 
@@ -39,4 +45,13 @@ public class ConfigurationProfile {
 
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
+
+    public String getRetrievalRoleArn() { return retrievalRoleArn; }
+    public void setRetrievalRoleArn(String retrievalRoleArn) { this.retrievalRoleArn = retrievalRoleArn; }
+
+    public String getKmsKeyIdentifier() { return kmsKeyIdentifier; }
+    public void setKmsKeyIdentifier(String kmsKeyIdentifier) { this.kmsKeyIdentifier = kmsKeyIdentifier; }
+
+    public String getKmsKeyArn() { return kmsKeyArn; }
+    public void setKmsKeyArn(String kmsKeyArn) { this.kmsKeyArn = kmsKeyArn; }
 }

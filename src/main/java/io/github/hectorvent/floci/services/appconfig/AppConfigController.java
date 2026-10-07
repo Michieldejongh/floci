@@ -16,6 +16,7 @@ import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.PATCH;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
@@ -67,6 +68,12 @@ public class AppConfigController {
         return Response.ok(root).build();
     }
 
+    @PATCH
+    @Path("/applications/{id}")
+    public Response updateApplication(@PathParam("id") String id, String body) throws IOException {
+        return Response.ok(service.updateApplication(id, readRequest(body))).build();
+    }
+
     @DELETE
     @Path("/applications/{id}")
     public Response deleteApplication(@PathParam("id") String id) {
@@ -89,6 +96,13 @@ public class AppConfigController {
     @Path("/applications/{appId}/environments/{envId}")
     public Response getEnvironment(@PathParam("appId") String appId, @PathParam("envId") String envId) {
         return Response.ok(service.getEnvironment(appId, envId)).build();
+    }
+
+    @PATCH
+    @Path("/applications/{appId}/environments/{envId}")
+    public Response updateEnvironment(@PathParam("appId") String appId, @PathParam("envId") String envId,
+                                      String body) throws IOException {
+        return Response.ok(service.updateEnvironment(appId, envId, readRequest(body))).build();
     }
 
     @GET
@@ -126,6 +140,14 @@ public class AppConfigController {
         ArrayNode items = root.putArray("Items");
         profiles.forEach(items::addPOJO);
         return Response.ok(root).build();
+    }
+
+    @PATCH
+    @Path("/applications/{appId}/configurationprofiles/{profileId}")
+    public Response updateConfigurationProfile(@PathParam("appId") String appId,
+                                               @PathParam("profileId") String profileId,
+                                               String body) throws IOException {
+        return Response.ok(service.updateConfigurationProfile(appId, profileId, readRequest(body))).build();
     }
 
     @DELETE
@@ -259,5 +281,10 @@ public class AppConfigController {
     @Path("/applications/{appId}/environments/{envId}/deployments/{deploymentNumber}")
     public Response getDeployment(@PathParam("appId") String appId, @PathParam("envId") String envId, @PathParam("deploymentNumber") int deploymentNumber) {
         return Response.ok(service.getDeployment(appId, envId, deploymentNumber)).build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> readRequest(String body) throws IOException {
+        return body == null || body.isBlank() ? Map.of() : objectMapper.readValue(body, Map.class);
     }
 }
