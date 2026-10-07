@@ -34,6 +34,7 @@ order:
   - AWS::ApiGateway
   - AWS::ApiGatewayV2
   - AWS::AppSync
+  - AWS::AppConfig
   - AWS::StepFunctions
   - AWS::CodePipeline
   - AWS::CodeBuild
@@ -99,6 +100,7 @@ type_order:
   AWS::ApiGateway: [RestApi, Resource, Authorizer, Method, Deployment, Stage, Account, DomainName, BasePathMapping, GatewayResponse]
   AWS::ApiGatewayV2: [Api, Authorizer, Route, Integration, Stage, Deployment]
   AWS::AppSync: [GraphQLApi, GraphQLSchema, DataSource, FunctionConfiguration, Resolver, ApiKey]
+  AWS::AppConfig: [Application, Environment, ConfigurationProfile]
   AWS::CodePipeline: [Pipeline, CustomActionType, Webhook]
   AWS::Batch: [ComputeEnvironment, JobQueue, JobDefinition]
   AWS::Cognito: [UserPool, UserPoolClient]
@@ -109,6 +111,7 @@ type_order:
 service_labels:
   AWS::ApiGateway: API Gateway (v1)
   AWS::ApiGatewayV2: API Gateway v2
+  AWS::AppConfig: AppConfig
   AWS::AppSync: AppSync
   AWS::AutoScaling: Auto Scaling
   AWS::Batch: Batch

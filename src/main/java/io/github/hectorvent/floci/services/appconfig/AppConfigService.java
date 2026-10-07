@@ -75,6 +75,19 @@ public class AppConfigService {
         return applicationStore.scan(k -> true);
     }
 
+    /** UpdateApplication: a key present in {@code request} is applied, an absent one left as is. */
+    public Application updateApplication(String id, Map<String, Object> request) {
+        Application app = getApplication(id);
+        if (request.containsKey("Name")) {
+            app.setName((String) request.get("Name"));
+        }
+        if (request.containsKey("Description")) {
+            app.setDescription((String) request.get("Description"));
+        }
+        applicationStore.put(id, app);
+        return app;
+    }
+
     public void deleteApplication(String id) {
         applicationStore.delete(id);
     }
@@ -114,6 +127,40 @@ public class AppConfigService {
                 .toList();
     }
 
+    /** UpdateEnvironment: a key present in {@code request} is applied, an absent one left as is. */
+    public Environment updateEnvironment(String appId, String envId, Map<String, Object> request) {
+        Environment env = getEnvironment(appId, envId);
+        if (request.containsKey("Name")) {
+            env.setName((String) request.get("Name"));
+        }
+        if (request.containsKey("Description")) {
+            env.setDescription((String) request.get("Description"));
+        }
+        environmentStore.put(envId, env);
+        return env;
+    }
+
+    public void deleteEnvironment(String appId, String envId) {
+        // Scoped like deleteConfigurationProfile: an unknown envId is a no-op, one belonging to
+        // another application is rejected. Its deployments and active configurations go with it.
+        environmentStore.get(envId).ifPresent(env -> {
+            if (!env.getApplicationId().equals(appId)) {
+                throw new AwsException("ResourceNotFoundException", "Environment not found in this application", 404);
+            }
+        });
+        String deploymentPrefix = appId + "::" + envId + "::";
+        deploymentStore.keys().stream()
+                .filter(k -> k.startsWith(deploymentPrefix))
+                .toList()
+                .forEach(deploymentStore::delete);
+        String activePrefix = envId + "::";
+        activeConfigStore.keys().stream()
+                .filter(k -> k.startsWith(activePrefix))
+                .toList()
+                .forEach(activeConfigStore::delete);
+        environmentStore.delete(envId);
+    }
+
     // ──────────────────────────── Configuration Profile ────────────────────────────
 
     public ConfigurationProfile createConfigurationProfile(String appId, Map<String, Object> request) {
@@ -147,6 +194,19 @@ public class AppConfigService {
         return profileStore.scan(k -> true).stream()
                 .filter(p -> p.getApplicationId().equals(appId))
                 .toList();
+    }
+
+    /** UpdateConfigurationProfile: a key present in {@code request} is applied, an absent one left as is. */
+    public ConfigurationProfile updateConfigurationProfile(String appId, String profileId, Map<String, Object> request) {
+        ConfigurationProfile profile = getConfigurationProfile(appId, profileId);
+        if (request.containsKey("Name")) {
+            profile.setName((String) request.get("Name"));
+        }
+        if (request.containsKey("Description")) {
+            profile.setDescription((String) request.get("Description"));
+        }
+        profileStore.put(profileId, profile);
+        return profile;
     }
 
     public void deleteConfigurationProfile(String appId, String profileId) {

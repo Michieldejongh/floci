@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.backup.BackupService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import io.github.hectorvent.floci.services.appconfig.AppConfigService;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.batch.BatchService;
@@ -46,6 +47,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.BackupVau
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BatchCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsArchiveCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.AppConfigCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AppSyncCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudTrailCfnProvisioner;
@@ -226,6 +228,7 @@ final class CfnProvisionerFixture {
         private RedshiftService redshiftService;
         private RedshiftServerlessService redshiftServerlessService;
         private CloudMapService cloudMapService;
+        private AppConfigService appConfigService;
         private CloudFormationResourceRegistry resourceRegistry;
         private boolean registryChosenByTest;
         private CfnDynamicReferences dynamicReferences;
@@ -449,6 +452,9 @@ final class CfnProvisionerFixture {
             }
             if (cloudMapService != null) {
                 discovered.add(new CloudMapCfnProvisioner(cloudMapService));
+            }
+            if (appConfigService != null) {
+                discovered.add(new AppConfigCfnProvisioner(appConfigService));
             }
             return discovered;
         }
@@ -719,6 +725,11 @@ final class CfnProvisionerFixture {
 
         public Builder cloudMap(CloudMapService v) {
             this.cloudMapService = v;
+            return this;
+        }
+
+        public Builder appConfig(AppConfigService v) {
+            this.appConfigService = v;
             return this;
         }
 

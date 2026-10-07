@@ -67,6 +67,15 @@
     "SecurityGroupIds",
     "SubnetIds"
   ],
+  "AWS::AppConfig::Application": [],
+  "AWS::AppConfig::ConfigurationProfile": [
+    "LocationUri",
+    "Type",
+    "ApplicationId"
+  ],
+  "AWS::AppConfig::Environment": [
+    "ApplicationId"
+  ],
   "AWS::AppSync::ApiKey": [
     "ApiId"
   ],
