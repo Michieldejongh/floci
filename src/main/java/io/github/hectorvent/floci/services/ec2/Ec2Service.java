@@ -153,6 +153,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private static final String DEFAULT_ROOT_VOLUME_TYPE = "gp3";
     private static final Set<String> VALID_VOLUME_TYPES =
             Set.of("standard", "io1", "io2", "gp2", "sc1", "st1", "gp3");
+    private static final Set<String> VPC_ENDPOINT_IP_ADDRESS_TYPES = Set.of("ipv4", "dualstack", "ipv6");
+    private static final Set<String> VPC_ENDPOINT_DNS_RECORD_IP_TYPES =
+            Set.of("ipv4", "dualstack", "ipv6", "service-defined");
     /** The accounts behind the two non-self owner aliases DescribeImages accepts. */
     private static final String AMAZON_OWNER_ID = "137112412989";
     private static final String AWS_MARKETPLACE_OWNER_ID = "679593333241";
@@ -4593,6 +4596,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                          List<String> securityGroupIds, Boolean privateDnsEnabled,
                                          String policyDocument, List<Tag> endpointTags,
                                          List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
+        return createVpcEndpoint(region, vpcId, serviceName, endpointType, routeTableIds, subnetIds,
+                securityGroupIds, privateDnsEnabled, policyDocument, endpointTags, subnetConfigurations,
+                null, null);
+    }
+
+    /**
+     * {@code ipAddressType} and {@code dnsRecordIpType} are the request's {@code IpAddressType}
+     * and {@code DnsOptions.DnsRecordIpType}. Every endpoint defaults to {@code ipv4} for the
+     * address type; an interface endpoint also defaults its DNS record type to {@code ipv4}, while
+     * a gateway endpoint, which has no DNS records of its own, reports one only when set.
+     */
+    public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
+                                         List<String> routeTableIds, List<String> subnetIds,
+                                         List<String> securityGroupIds, Boolean privateDnsEnabled,
+                                         String policyDocument, List<Tag> endpointTags,
+                                         List<VpcEndpointSubnetConfiguration> subnetConfigurations,
+                                         String ipAddressType, String dnsRecordIpType) {
+        validateVpcEndpointEnum("IpAddressType", ipAddressType, VPC_ENDPOINT_IP_ADDRESS_TYPES);
+        validateVpcEndpointEnum("DnsOptions.DnsRecordIpType", dnsRecordIpType, VPC_ENDPOINT_DNS_RECORD_IP_TYPES);
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
@@ -4623,6 +4645,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         endpoint.setVpcEndpointType(endpointType != null && !endpointType.isBlank() ? endpointType : "Gateway");
         boolean isInterface = "Interface".equalsIgnoreCase(endpoint.getVpcEndpointType());
         endpoint.setPrivateDnsEnabled(privateDnsEnabled != null ? privateDnsEnabled : isInterface);
+        endpoint.setIpAddressType(ipAddressType != null ? ipAddressType : "ipv4");
+        endpoint.setDnsRecordIpType(dnsRecordIpType != null ? dnsRecordIpType : isInterface ? "ipv4" : null);
         endpoint.setCreationTimestamp(Instant.now());
         endpoint.setRegion(region);
         endpoint.setRouteTableIds(new ArrayList<>(routeTableIds));
@@ -4666,6 +4690,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                          List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
                                          String policyDocument, Boolean resetPolicy, Boolean privateDnsEnabled,
                                          List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
+        return modifyVpcEndpoint(region, endpointId, addRouteTableIds, removeRouteTableIds,
+                addSubnetIds, removeSubnetIds, addSecurityGroupIds, removeSecurityGroupIds,
+                policyDocument, resetPolicy, privateDnsEnabled, subnetConfigurations, null, null);
+    }
+
+    public VpcEndpoint modifyVpcEndpoint(String region, String endpointId,
+                                         List<String> addRouteTableIds, List<String> removeRouteTableIds,
+                                         List<String> addSubnetIds, List<String> removeSubnetIds,
+                                         List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
+                                         String policyDocument, Boolean resetPolicy, Boolean privateDnsEnabled,
+                                         List<VpcEndpointSubnetConfiguration> subnetConfigurations,
+                                         String ipAddressType, String dnsRecordIpType) {
         // VpcEndpointId is the one required member of ModifyVpcEndpointRequest. The model
         // requires it to be present, not to be non-empty, so only an absent value is a
         // MissingParameter; a present-but-unknown id is an InvalidVpcEndpointId.NotFound.
@@ -4673,6 +4709,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             throw new AwsException("MissingParameter",
                     "The request must contain the parameter VpcEndpointId", 400);
         }
+        validateVpcEndpointEnum("IpAddressType", ipAddressType, VPC_ENDPOINT_IP_ADDRESS_TYPES);
+        validateVpcEndpointEnum("DnsOptions.DnsRecordIpType", dnsRecordIpType, VPC_ENDPOINT_DNS_RECORD_IP_TYPES);
         ensureDefaultResources(region);
         // Terraform declares each aws_vpc_endpoint_route_table_association as its own
         // resource and applies them in parallel, so several ModifyVpcEndpoint calls land
@@ -4684,7 +4722,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             return modifyVpcEndpointLocked(region, endpointId,
                     addRouteTableIds, removeRouteTableIds, addSubnetIds, removeSubnetIds,
                     addSecurityGroupIds, removeSecurityGroupIds,
-                    policyDocument, resetPolicy, privateDnsEnabled, subnetConfigurations);
+                    policyDocument, resetPolicy, privateDnsEnabled, subnetConfigurations,
+                    ipAddressType, dnsRecordIpType);
         }
     }
 
@@ -4694,7 +4733,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                                 List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
                                                 String policyDocument, Boolean resetPolicy,
                                                 Boolean privateDnsEnabled,
-                                                List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
+                                                List<VpcEndpointSubnetConfiguration> subnetConfigurations,
+                                                String ipAddressType, String dnsRecordIpType) {
         VpcEndpoint endpoint = getRequiredVpcEndpoint(region, endpointId);
 
         // Validate every referenced id before mutating anything, so a request naming one
@@ -4723,9 +4763,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (privateDnsEnabled != null) {
             endpoint.setPrivateDnsEnabled(privateDnsEnabled);
         }
+        if (ipAddressType != null) {
+            endpoint.setIpAddressType(ipAddressType);
+        }
+        if (dnsRecordIpType != null) {
+            endpoint.setDnsRecordIpType(dnsRecordIpType);
+        }
 
         vpcEndpoints.put(key(region, endpointId), endpoint);
         return endpoint;
+    }
+
+    private static void validateVpcEndpointEnum(String parameter, String value, Set<String> allowed) {
+        if (value != null && !allowed.contains(value)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + value + ") for parameter " + parameter + " is invalid.", 400);
+        }
     }
 
     /**

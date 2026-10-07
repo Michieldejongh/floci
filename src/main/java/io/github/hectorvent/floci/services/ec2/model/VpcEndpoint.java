@@ -23,6 +23,8 @@ public class VpcEndpoint {
     private List<String> securityGroupIds = new ArrayList<>();
     private boolean privateDnsEnabled;
     private String policyDocument;
+    private String ipAddressType;
+    private String dnsRecordIpType;
     /**
      * The addresses the caller pinned per subnet through {@code SubnetConfiguration}. AWS assigns
      * each one to the endpoint's network interface in that subnet, so this is read back from the
@@ -69,6 +71,12 @@ public class VpcEndpoint {
 
     public String getPolicyDocument() { return policyDocument; }
     public void setPolicyDocument(String policyDocument) { this.policyDocument = policyDocument; }
+
+    public String getIpAddressType() { return ipAddressType; }
+    public void setIpAddressType(String ipAddressType) { this.ipAddressType = ipAddressType; }
+
+    public String getDnsRecordIpType() { return dnsRecordIpType; }
+    public void setDnsRecordIpType(String dnsRecordIpType) { this.dnsRecordIpType = dnsRecordIpType; }
 
     public List<VpcEndpointSubnetConfiguration> getSubnetConfigurations() { return subnetConfigurations; }
     public void setSubnetConfigurations(List<VpcEndpointSubnetConfiguration> subnetConfigurations) {

@@ -2163,7 +2163,9 @@ public class Ec2QueryHandler {
                 p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
                 p.getFirst("PolicyDocument"),
                 parseTagsForResource(p, "vpc-endpoint"),
-                parseSubnetConfigurations(p));
+                parseSubnetConfigurations(p),
+                p.getFirst("IpAddressType"),
+                p.getFirst("DnsOptions.DnsRecordIpType"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2185,7 +2187,9 @@ public class Ec2QueryHandler {
                 p.getFirst("PolicyDocument"),
                 p.getFirst("ResetPolicy") != null ? Boolean.valueOf(p.getFirst("ResetPolicy")) : null,
                 p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
-                parseSubnetConfigurations(p));
+                parseSubnetConfigurations(p),
+                p.getFirst("IpAddressType"),
+                p.getFirst("DnsOptions.DnsRecordIpType"));
         // ModifyVpcEndpoint returns only a boolean; the caller re-reads the endpoint
         // through DescribeVpcEndpoints to see the result.
         XmlBuilder xml = new XmlBuilder()
@@ -5739,6 +5743,17 @@ public class Ec2QueryHandler {
         if (endpoint.getPolicyDocument() != null) {
             xml.elem("policyDocument", endpoint.getPolicyDocument());
         }
+        if (endpoint.getIpAddressType() != null) {
+            xml.elem("ipAddressType", endpoint.getIpAddressType());
+        }
+        // AWS returns dnsOptions on gateway endpoints too, without a record type.
+        // PrivateDnsOnlyForInboundResolverEndpoint is not modelled, so it is always false.
+        xml.start("dnsOptions");
+        if (endpoint.getDnsRecordIpType() != null) {
+            xml.elem("dnsRecordIpType", endpoint.getDnsRecordIpType());
+        }
+        xml.elem("privateDnsOnlyForInboundResolverEndpoint", "false")
+                .end("dnsOptions");
         xml.start("routeTableIdSet");
         for (String routeTableId : endpoint.getRouteTableIds()) {
             xml.elem("item", routeTableId);

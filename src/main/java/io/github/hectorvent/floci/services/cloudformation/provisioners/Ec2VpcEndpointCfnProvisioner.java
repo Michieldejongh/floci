@@ -62,7 +62,10 @@ public class Ec2VpcEndpointCfnProvisioner implements CfnResourceProvisioner {
                 resolveIdList(props, "SecurityGroupIds", ctx),
                 privateDnsEnabled,
                 policyDocument(props, ctx),
-                List.of());
+                List.of(),
+                List.of(),
+                ctx.resolveOptional(props, "IpAddressType"),
+                dnsRecordIpType(props, ctx));
         r.setPhysicalId(endpoint.getVpcEndpointId());
         r.getAttributes().put("Id", endpoint.getVpcEndpointId());
         // An unset attribute resolves to the literal "LogicalId.CreationTimestamp" rather than
@@ -104,6 +107,15 @@ public class Ec2VpcEndpointCfnProvisioner implements CfnResourceProvisioner {
             return null;
         }
         return ctx.engine().resolveJsonAttribute(props.path("PolicyDocument"));
+    }
+
+    /** {@code DnsOptions} is a nested object; only its {@code DnsRecordIpType} is modelled. */
+    private String dnsRecordIpType(JsonNode props, ProvisionContext ctx) {
+        if (props == null || !props.hasNonNull("DnsOptions")) {
+            return null;
+        }
+        String value = ctx.resolveOptional(ctx.engine().resolveNode(props.get("DnsOptions")), "DnsRecordIpType");
+        return value != null && !value.isBlank() ? value : null;
     }
 
     /** Resolve an array property of Ref/GetAtt entries into plain id strings. */
