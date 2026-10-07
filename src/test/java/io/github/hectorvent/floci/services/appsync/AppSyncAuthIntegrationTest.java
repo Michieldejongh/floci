@@ -262,6 +262,15 @@ class AppSyncAuthIntegrationTest {
                 "test", "test", "us-east-1", Instant.now());
     }
 
+    @Test
+    void cognitoUserPoolsDirectiveWithoutGroupsIsAValidSchema() {
+        // AWS declares cognito_groups optional; the bare directive allows any user of the pool.
+        String apiId = createApi("cognito-bare-" + UUID.randomUUID().toString().substring(0, 8));
+        startSchema(apiId, "type Info @aws_api_key @aws_cognito_user_pools { name: String }"
+                + " type Query { info: Info @aws_cognito_user_pools }");
+        awaitSchemaSuccess(apiId);
+    }
+
     private static String createApi(String name) {
         return given()
             .header("Authorization", MGMT_AUTH)
