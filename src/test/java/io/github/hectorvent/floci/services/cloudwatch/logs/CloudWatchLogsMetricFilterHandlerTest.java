@@ -40,6 +40,7 @@ class CloudWatchLogsMetricFilterHandlerTest {
                         new RegionResolver(REGION, "000000000000"), MAPPER),
                 new CloudWatchLogsMetricFilterService(service,
                         mock(CloudWatchMetricsService.class), new RegionResolver(REGION, "000000000000")),
+                new CloudWatchLogsQueryDefinitionService(new InMemoryStorage<>(), System::currentTimeMillis),
                 MAPPER);
         service.createLogGroup(GROUP, null, null, REGION);
     }

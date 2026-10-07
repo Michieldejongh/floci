@@ -50,10 +50,20 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `StartQuery` | Start a Logs Insights query (see [Logs Insights](#logs-insights)) |
 | `GetQueryResults` | Get the status and results of a Logs Insights query |
 | `StopQuery` | Stop a query that has not completed yet |
+| `PutQueryDefinition` | Create or update a saved Logs Insights query definition |
+| `DescribeQueryDefinitions` | List saved query definitions by name prefix and query language, paginated |
+| `DeleteQueryDefinition` | Delete a saved query definition |
 
 Log group deletion protection defaults to disabled and is persisted with the log group. When it is
 enabled, `DeleteLogGroup` returns `ValidationException` until protection is explicitly disabled
 with `PutLogGroupDeletionProtection`.
+
+Saved query definitions are stored per account and region. `PutQueryDefinition` without a
+`queryDefinitionId` creates a definition with a new id; with one, it replaces `name`,
+`queryString`, `logGroupNames`, `parameters` and `queryLanguage` of that definition, and an
+unknown id returns `ResourceNotFoundException`. `queryLanguage` defaults to `CWLI`.
+`DescribeQueryDefinitions` returns definitions ordered by name, `maxResults` defaults to 1000.
+Floci does not run a definition by itself: pass its `queryString` to `StartQuery`.
 
 Two actions are currently simplified:
 

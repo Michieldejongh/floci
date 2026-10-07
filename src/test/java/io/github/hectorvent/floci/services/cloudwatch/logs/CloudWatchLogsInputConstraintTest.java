@@ -48,6 +48,7 @@ class CloudWatchLogsInputConstraintTest {
                         new RegionResolver(REGION, ACCOUNT), MAPPER),
                 new CloudWatchLogsMetricFilterService(service,
                         mock(CloudWatchMetricsService.class), new RegionResolver(REGION, ACCOUNT)),
+                new CloudWatchLogsQueryDefinitionService(new InMemoryStorage<>(), System::currentTimeMillis),
                 MAPPER);
         service.createLogGroup(GROUP, null, null, REGION);
         service.createLogStream(GROUP, "s1", REGION);

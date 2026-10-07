@@ -29,16 +29,19 @@ public class CloudWatchLogsHandler {
     private final CloudWatchLogsService logsService;
     private final CloudWatchLogsCrossAccountService crossAccountService;
     private final CloudWatchLogsMetricFilterHandler metricFilterHandler;
+    private final CloudWatchLogsQueryDefinitionHandler queryDefinitionHandler;
     private final ObjectMapper objectMapper;
 
     @Inject
     public CloudWatchLogsHandler(CloudWatchLogsService logsService,
                                  CloudWatchLogsCrossAccountService crossAccountService,
                                  CloudWatchLogsMetricFilterService metricFilterService,
+                                 CloudWatchLogsQueryDefinitionService queryDefinitionService,
                                  ObjectMapper objectMapper) {
         this.logsService = logsService;
         this.crossAccountService = crossAccountService;
         this.metricFilterHandler = new CloudWatchLogsMetricFilterHandler(metricFilterService, objectMapper);
+        this.queryDefinitionHandler = new CloudWatchLogsQueryDefinitionHandler(queryDefinitionService, objectMapper);
         this.objectMapper = objectMapper;
     }
 
@@ -79,6 +82,8 @@ public class CloudWatchLogsHandler {
             case "StartQuery" -> handleStartQuery(request, region);
             case "GetQueryResults" -> handleGetQueryResults(request, region);
             case "StopQuery" -> handleStopQuery(request, region);
+            case "PutQueryDefinition", "DescribeQueryDefinitions", "DeleteQueryDefinition" ->
+                    queryDefinitionHandler.handle(action, request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
