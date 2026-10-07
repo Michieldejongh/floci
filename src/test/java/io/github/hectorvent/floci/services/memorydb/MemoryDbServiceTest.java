@@ -253,7 +253,7 @@ class MemoryDbServiceTest {
     }
 
     @Test
-    void createAclRequiresDefaultUser() {
+    void createAclAcceptsUsersWithoutTheDefaultUser() {
         User userSpec = new User();
         userSpec.setName("solo");
         userSpec.setAuthMode(AuthMode.PASSWORD);
@@ -263,9 +263,10 @@ class MemoryDbServiceTest {
 
         Acl aclSpec = new Acl();
         aclSpec.setName("no-default-acl");
-        aclSpec.setUserNames(List.of("solo")); // missing the required "default" user
-        AwsException ex = assertThrows(AwsException.class, () -> service.createAcl(aclSpec, "us-east-1"));
-        assertEquals("DefaultUserRequired", ex.jsonType());
+        aclSpec.setUserNames(List.of("solo")); // MemoryDB, unlike ElastiCache, needs no "default" user
+        Acl acl = service.createAcl(aclSpec, "us-east-1");
+
+        assertEquals(List.of("solo"), acl.getUserNames());
     }
 
     @Test

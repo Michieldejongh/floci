@@ -308,10 +308,6 @@ public class MemoryDbService {
             throw new AwsException("ACLAlreadyExistsFault",
                     "ACL with specified name already exists.", 400);
         }
-        if (!spec.getUserNames().contains(DEFAULT_USER)) {
-            throw new AwsException("DefaultUserRequired",
-                    "A default user is required and must be specified.", 400);
-        }
         java.util.Set<String> seen = new java.util.HashSet<>();
         for (String userName : spec.getUserNames()) {
             if (!seen.add(userName)) {

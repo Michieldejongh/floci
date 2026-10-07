@@ -149,7 +149,6 @@ class MemoryDbIntegrationTest {
                 .body("User.Name", equalTo(AUTH_USER))
                 .body("User.Authentication.Type", equalTo("password"));
 
-        // An ACL must include the built-in "default" user (DefaultUserRequired otherwise).
         memorydb("CreateACL", "{"
                 + "\"ACLName\":\"" + AUTH_ACL + "\","
                 + "\"UserNames\":[\"default\",\"" + AUTH_USER + "\"]}")
