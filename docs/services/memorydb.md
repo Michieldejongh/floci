@@ -6,6 +6,15 @@
 
 Floci manages real Valkey/Redis Docker containers and proxies TCP connections to them, so any Redis client works — including IAM-style authentication. MemoryDB is Redis wire-compatible, so it reuses Floci's ElastiCache RESP proxy and SigV4 validator.
 
+## Cluster Mode
+
+Like real MemoryDB, every cluster runs in cluster mode (`cluster-enabled yes`), so cluster clients — ioredis `Redis.Cluster`, redis-py `RedisCluster`, Lettuce, `valkey-cli -c` — connect the same way they do against AWS:
+
+- Each cluster is **one shard with one node** that owns all 16384 hash slots; `CLUSTER INFO` reports `cluster_state:ok`. `NumShards` and `NumReplicasPerShard` are accepted and reported but not modelled as extra nodes.
+- The node announces the `ClusterEndpoint` from `DescribeClusters` (host = `FLOCI_HOSTNAME`, default `localhost`; port = the proxy port) as its preferred endpoint, so `CLUSTER SLOTS`, `CLUSTER SHARDS`, `CLUSTER NODES` and `MOVED` redirects send clients back through the auth proxy.
+- Cluster-mode announce settings need a Valkey 8+ image (the default `valkey/valkey:8`); the flags are passed through the image's `VALKEY_EXTRA_FLAGS` hook.
+- TLS is not terminated: `TLSEnabled` is reported, but clients connect over plain TCP.
+
 ## Mock Mode
 
 Set `FLOCI_SERVICES_MEMORYDB_MOCK=true` to manage clusters as control-plane-only resources — no Redis container is started. The management API (`CreateCluster`, `DescribeClusters`, tagging, etc.) behaves normally and returns a `ClusterEndpoint` of `<hostname>:6379` (defaults to `localhost:6379`, controlled by `FLOCI_HOSTNAME`), but there is no live data plane to connect to. This is intended for Infrastructure-as-Code tools like Terraform and OpenTofu running in environments without a Docker socket, where you only need the AWS resources to exist and return consistent attributes.
@@ -75,8 +84,9 @@ aws memorydb describe-clusters \
   --query 'Clusters[0].ClusterEndpoint' \
   --endpoint-url $AWS_ENDPOINT_URL
 
-# Connect with redis-cli (use the Port from ClusterEndpoint)
-redis-cli -h localhost -p 6400 ping
+# Connect with redis-cli (use the Port from ClusterEndpoint); -c follows cluster redirects
+redis-cli -c -h localhost -p 6400 ping
+redis-cli -c -h localhost -p 6400 cluster slots
 
 # Delete the cluster
 aws memorydb delete-cluster \

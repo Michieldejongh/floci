@@ -76,8 +76,13 @@ public class MemoryDbContainerManager {
      * @return the container handle, or {@code null} when no Docker daemon is reachable
      */
     public MemoryDbContainerHandle tryStart(String clusterName, String image) {
+        return tryStart(clusterName, image, List.of());
+    }
+
+    /** {@link #tryStart(String, String)} with extra Valkey server flags, as for {@link #start(String, String, List)}. */
+    public MemoryDbContainerHandle tryStart(String clusterName, String image, List<String> extraServerFlags) {
         try {
-            MemoryDbContainerHandle handle = start(clusterName, image);
+            MemoryDbContainerHandle handle = start(clusterName, image, extraServerFlags);
             dockerUnavailableLogged = false;
             return handle;
         } catch (RuntimeException e) {
@@ -110,6 +115,15 @@ public class MemoryDbContainerManager {
     }
 
     public MemoryDbContainerHandle start(String clusterName, String image) {
+        return start(clusterName, image, List.of());
+    }
+
+    /**
+     * Starts a backend container for the given cluster, appending {@code extraServerFlags} to the
+     * Valkey server command line (via the image's {@code VALKEY_EXTRA_FLAGS} hook). The service
+     * uses this to run the node in cluster mode with the proxy endpoint announced.
+     */
+    public MemoryDbContainerHandle start(String clusterName, String image, List<String> extraServerFlags) {
         LOG.infov("Starting MemoryDB backend container for cluster: {0}", clusterName);
 
         String containerName = containerName(clusterName);
@@ -122,6 +136,10 @@ public class MemoryDbContainerManager {
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "memorydb", clusterName, regionResolver.getAccountId(), resolvedRegion()));
+
+        if (!extraServerFlags.isEmpty()) {
+            specBuilder.withEnv("VALKEY_EXTRA_FLAGS", String.join(" ", extraServerFlags));
+        }
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(BACKEND_PORT);

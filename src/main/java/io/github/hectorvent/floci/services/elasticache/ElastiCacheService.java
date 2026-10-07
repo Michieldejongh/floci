@@ -36,9 +36,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.net.Inet4Address;
-import java.net.InetAddress;
-import java.net.UnknownHostException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -331,7 +328,7 @@ public class ElastiCacheService implements ResourceProvider {
                 : 0;
         String image = config.services().elasticache().defaultImage();
         String endpointHost = resolveClusterAnnounceHost();
-        String announceIp = resolveAnnounceIp(endpointHost);
+        String announceIp = ValkeyClusterFormation.resolveAnnounceIp(endpointHost);
 
         LOG.infov("Creating cluster-mode replication group {0} with {1} node group(s), {2} replica(s) each",
                 groupId, String.valueOf(numNodeGroups), String.valueOf(replicasPerNodeGroup));
@@ -359,7 +356,7 @@ public class ElastiCacheService implements ResourceProvider {
                 inFlightMemberId = node.getMemberClusterId();
                 ElastiCacheContainerHandle handle = containerManager.start(
                         node.getMemberClusterId(), image,
-                        clusterNodeFlags(endpointHost, announceIp, node.getProxyPort()), request.region());
+                        ValkeyClusterFormation.nodeFlags(endpointHost, announceIp, node.getProxyPort()), request.region());
                 inFlightMemberId = null;
                 handles.add(handle);
                 node.setContainerId(handle.getContainerId());
@@ -464,36 +461,6 @@ public class ElastiCacheService implements ResourceProvider {
             }
         }
         return request.numNodeGroups() != null && request.numNodeGroups() > 1;
-    }
-
-    /**
-     * Nodes announce the cluster announce hostname as their preferred endpoint, so MOVED/ASK
-     * redirects and CLUSTER SLOTS hand clients the exact name floci reports as the configuration
-     * endpoint — how (or whether) that name resolves inside floci's own container is irrelevant.
-     * The best-effort IPv4 stays announced for consumers that read the address fields instead.
-     */
-    private static List<String> clusterNodeFlags(String endpointHost, String announceIp, int proxyPort) {
-        return List.of(
-                "--cluster-enabled", "yes",
-                "--cluster-announce-hostname", endpointHost,
-                "--cluster-preferred-endpoint-type", "hostname",
-                "--cluster-announce-client-ipv4", announceIp,
-                "--cluster-announce-port", String.valueOf(proxyPort),
-                "--cluster-announce-bus-port", "16379");
-    }
-
-    private static String resolveAnnounceIp(String endpointHost) {
-        try {
-            for (InetAddress address : InetAddress.getAllByName(endpointHost)) {
-                if (address instanceof Inet4Address) {
-                    return address.getHostAddress();
-                }
-            }
-        } catch (UnknownHostException e) {
-            LOG.warnv("Could not resolve {0} to an IPv4 for cluster announce, using 127.0.0.1: {1}",
-                    endpointHost, e.getMessage());
-        }
-        return "127.0.0.1";
     }
 
     private static int validateRange(String parameterName, int value, int min, int max) {
@@ -955,7 +922,7 @@ public class ElastiCacheService implements ResourceProvider {
         String groupId = group.getReplicationGroupId();
         String image = config.services().elasticache().defaultImage();
         String endpointHost = resolveClusterAnnounceHost();
-        String announceIp = resolveAnnounceIp(endpointHost);
+        String announceIp = ValkeyClusterFormation.resolveAnnounceIp(endpointHost);
         List<ClusterNode> nodes = group.getClusterNodes();
 
         List<ElastiCacheContainerHandle> handles = new ArrayList<>();
@@ -968,7 +935,7 @@ public class ElastiCacheService implements ResourceProvider {
                 inFlightMemberId = node.getMemberClusterId();
                 ElastiCacheContainerHandle handle = containerManager.start(
                         node.getMemberClusterId(), image,
-                        clusterNodeFlags(endpointHost, announceIp, node.getProxyPort()), regionOf(group.getArn()));
+                        ValkeyClusterFormation.nodeFlags(endpointHost, announceIp, node.getProxyPort()), regionOf(group.getArn()));
                 inFlightMemberId = null;
                 handles.add(handle);
                 node.setContainerId(handle.getContainerId());

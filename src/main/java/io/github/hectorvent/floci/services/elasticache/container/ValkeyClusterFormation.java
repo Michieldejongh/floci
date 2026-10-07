@@ -7,8 +7,11 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -101,6 +104,38 @@ public class ValkeyClusterFormation {
         } finally {
             clients.forEach(RespClient::closeQuietly);
         }
+    }
+
+    /**
+     * Server flags for a cluster-enabled node that clients reach through a Floci proxy.
+     * Nodes announce the given hostname as their preferred endpoint, so MOVED/ASK redirects and
+     * CLUSTER SLOTS/SHARDS/NODES hand clients the exact name Floci reports as the endpoint — how
+     * (or whether) that name resolves inside Floci's own container is irrelevant. The best-effort
+     * IPv4 stays announced for consumers that read the address fields instead.
+     */
+    public static List<String> nodeFlags(String endpointHost, String announceIp, int proxyPort) {
+        return List.of(
+                "--cluster-enabled", "yes",
+                "--cluster-announce-hostname", endpointHost,
+                "--cluster-preferred-endpoint-type", "hostname",
+                "--cluster-announce-client-ipv4", announceIp,
+                "--cluster-announce-port", String.valueOf(proxyPort),
+                "--cluster-announce-bus-port", "16379");
+    }
+
+    /** Best-effort IPv4 for {@code endpointHost}, falling back to loopback. */
+    public static String resolveAnnounceIp(String endpointHost) {
+        try {
+            for (InetAddress address : InetAddress.getAllByName(endpointHost)) {
+                if (address instanceof Inet4Address) {
+                    return address.getHostAddress();
+                }
+            }
+        } catch (UnknownHostException e) {
+            LOG.warnv("Could not resolve {0} to an IPv4 for cluster announce, using 127.0.0.1: {1}",
+                    endpointHost, e.getMessage());
+        }
+        return "127.0.0.1";
     }
 
     /** The contiguous slot range served by the given shard, covering all 16384 slots overall. */

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.elasticache.container.ValkeyClusterFormation;
 import io.github.hectorvent.floci.services.elasticache.proxy.SigV4Validator;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerHandle;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
@@ -65,6 +66,7 @@ public class MemoryDbService {
     private final MemoryDbContainerManager containerManager;
     private final MemoryDbProxyManager proxyManager;
     private final SigV4Validator sigV4Validator;
+    private final ValkeyClusterFormation clusterFormation;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
@@ -74,12 +76,14 @@ public class MemoryDbService {
     public MemoryDbService(MemoryDbContainerManager containerManager,
                            MemoryDbProxyManager proxyManager,
                            SigV4Validator sigV4Validator,
+                           ValkeyClusterFormation clusterFormation,
                            StorageFactory storageFactory,
                            EmulatorConfig config,
                            RegionResolver regionResolver) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.sigV4Validator = sigV4Validator;
+        this.clusterFormation = clusterFormation;
         this.config = config;
         this.regionResolver = regionResolver;
         this.clusters = storageFactory.create("memorydb", "memorydb-clusters.json",
@@ -557,14 +561,22 @@ public class MemoryDbService {
             // from configuration and need no Docker, so the cluster is created and reaches
             // 'available' even when no daemon is reachable. Only connecting to the cache needs
             // the container.
-            handle = containerManager.tryStart(identity, image);
-            cluster.setClusterEndpoint(new Endpoint(resolveEndpointHost(), proxyPort));
+            // MemoryDB always runs in cluster mode: the node announces the proxy endpoint, so
+            // cluster clients follow CLUSTER SLOTS/SHARDS back through the proxy.
+            String endpointHost = resolveEndpointHost();
+            handle = containerManager.tryStart(identity, image, ValkeyClusterFormation.nodeFlags(
+                    endpointHost, ValkeyClusterFormation.resolveAnnounceIp(endpointHost), proxyPort));
+            cluster.setClusterEndpoint(new Endpoint(endpointHost, proxyPort));
             cluster.setProxyPort(proxyPort);
 
             if (handle != null) {
                 cluster.setContainerId(handle.getContainerId());
                 cluster.setContainerHost(handle.getHost());
                 cluster.setContainerPort(handle.getPort());
+
+                // A single shard owning all 16384 slots; NumShards/NumReplicasPerShard are not modelled.
+                clusterFormation.form(identity, List.of(new ValkeyClusterFormation.Node(
+                        handle.getHost(), handle.getPort(), handle.getHost(), 0, true)), 1);
 
                 proxyManager.startProxy(identity, authRequired, proxyPort,
                         handle.getHost(), handle.getPort(),
