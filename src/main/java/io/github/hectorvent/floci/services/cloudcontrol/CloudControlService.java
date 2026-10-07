@@ -261,7 +261,7 @@ public class CloudControlService {
                 if (resource == null || resource.getPhysicalId() == null) {
                     record(pending.failed("CreateResource is not supported for " + typeName + "."));
                 } else {
-                    String model = resourceModel(region, typeName, resource.getPhysicalId(), props);
+                    String model = resourceModel(region, typeName, resource.getPhysicalId(), props, resource.getAttributes());
                     CreatedResource createdResource = new CreatedResource(token, accountId,
                             resource.getAttributes() == null ? Map.of() : Map.copyOf(resource.getAttributes()), model);
                     created.put(createdKey(accountId, region, typeName, resource.getPhysicalId()), createdResource);
@@ -281,7 +281,8 @@ public class CloudControlService {
      * the read side (which carries the schema property names); fall back to the desired state echoed
      * with the primary identifier, which is what dependents key on.
      */
-    private String resourceModel(String region, String typeName, String physicalId, JsonNode desiredState) {
+    private String resourceModel(String region, String typeName, String physicalId, JsonNode desiredState,
+                                 Map<String, String> attributes) {
         try {
             List<ResourceDescription> listed = resourcesForType(region, typeName);
             if (listed != null) {
@@ -297,7 +298,40 @@ public class CloudControlService {
         ObjectNode model = desiredState != null && desiredState.isObject()
                 ? ((ObjectNode) desiredState).deepCopy() : mapper.createObjectNode();
         model.put(primaryIdentifierField(typeName), physicalId);
+        mergeAttributes(model, attributes);
         return propertiesString(model);
+    }
+
+    /**
+     * Read-only properties (Arn, KeyId, ClusterEndpoint.Address, ...) are the provisioner's GetAtt
+     * attributes; Cloud Control returns them in the model, so clients such as Pulumi aws-native can
+     * read them. Dotted attribute names become nested objects. Desired-state values win.
+     */
+    private void mergeAttributes(ObjectNode model, Map<String, String> attributes) {
+        if (attributes == null) {
+            return;
+        }
+        attributes.forEach((name, value) -> {
+            if (name == null || value == null || name.startsWith("__Floci") || name.startsWith("Floci")) {
+                return;
+            }
+            String[] path = name.split("\\.");
+            ObjectNode target = model;
+            for (int i = 0; i < path.length - 1; i++) {
+                JsonNode child = target.get(path[i]);
+                if (child == null || !child.isObject()) {
+                    if (child != null) {
+                        return;
+                    }
+                    child = target.putObject(path[i]);
+                }
+                target = (ObjectNode) child;
+            }
+            String leaf = path[path.length - 1];
+            if (!target.has(leaf)) {
+                target.put(leaf, value);
+            }
+        });
     }
 
     /** The read-only primary identifier property name for the common EC2/IAM types. */

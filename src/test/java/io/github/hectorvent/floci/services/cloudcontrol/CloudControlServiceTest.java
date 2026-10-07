@@ -170,4 +170,43 @@ class CloudControlServiceTest {
 
         assertTrue(service.listResources("us-east-1", "AWS::S3::Bucket").isEmpty());
     }
+
+    @Test
+    void getResourceReturnsReadOnlyAttributesOfACreatedResource() throws Exception {
+        CfnResourceDispatcher provisioner = mock(CfnResourceDispatcher.class);
+        StackResource resource = new StackResource();
+        resource.setPhysicalId("cluster-1");
+        resource.setAttributes(Map.of(
+                "Arn", "arn:aws:memorydb:us-east-1:111111111111:cluster/cluster-1",
+                "ClusterEndpoint.Address", "localhost",
+                "ClusterEndpoint.Port", "6379",
+                "Description", "from-provisioner",
+                "__FlociCreateOnly", "internal",
+                "FlociLogGroupNameMode", "internal"));
+        when(provisioner.provisionStandalone(eq("AWS::MemoryDB::Cluster"),
+                any(), eq("us-east-1"),
+                eq("111111111111"))).thenReturn(resource);
+        ObjectMapper mapper = new ObjectMapper();
+        CloudControlService service = new CloudControlService(
+                mock(S3Service.class), mock(Ec2Service.class), mock(IamService.class), provisioner, mapper);
+
+        CloudControlService.ProgressEvent pending = service.createResource("us-east-1", "111111111111",
+                "AWS::MemoryDB::Cluster", "{\"ClusterName\":\"cluster-1\",\"Description\":\"desired\"}");
+        CloudControlService.ProgressEvent completed = pending;
+        for (int i = 0; i < 20 && !"SUCCESS".equals(completed.operationStatus()); i++) {
+            Thread.sleep(10);
+            completed = service.requestStatus("111111111111", pending.requestToken());
+        }
+        assertEquals("SUCCESS", completed.operationStatus());
+
+        JsonNode properties = mapper.readTree(service.getResource("us-east-1", "111111111111",
+                "AWS::MemoryDB::Cluster", "cluster-1").properties());
+        assertEquals("arn:aws:memorydb:us-east-1:111111111111:cluster/cluster-1", properties.path("Arn").asText());
+        assertEquals("localhost", properties.path("ClusterEndpoint").path("Address").asText());
+        assertEquals("6379", properties.path("ClusterEndpoint").path("Port").asText());
+        assertEquals("desired", properties.path("Description").asText());
+        assertEquals("cluster-1", properties.path("ClusterName").asText());
+        assertFalse(properties.has("__FlociCreateOnly"));
+        assertFalse(properties.has("FlociLogGroupNameMode"));
+    }
 }
