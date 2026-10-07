@@ -33,6 +33,7 @@ public class DocDbCluster {
     private String preferredBackupWindow;
     private String preferredMaintenanceWindow;
     private boolean deletionProtection;
+    private List<String> enabledCloudwatchLogsExports = new ArrayList<>();
     private Instant createdAt;
 
     // Docker / proxy runtime fields — persisted so cleanup works across restarts
@@ -92,6 +93,14 @@ public class DocDbCluster {
     public void setPreferredMaintenanceWindow(String preferredMaintenanceWindow) { this.preferredMaintenanceWindow = preferredMaintenanceWindow; }
     public boolean isDeletionProtection() { return deletionProtection; }
     public void setDeletionProtection(boolean deletionProtection) { this.deletionProtection = deletionProtection; }
+
+    public List<String> getEnabledCloudwatchLogsExports() { return enabledCloudwatchLogsExports; }
+
+    /** Normalizes null: a record persisted before log exports were stored deserializes without them. */
+    public void setEnabledCloudwatchLogsExports(List<String> enabledCloudwatchLogsExports) {
+        this.enabledCloudwatchLogsExports = enabledCloudwatchLogsExports != null
+                ? new ArrayList<>(enabledCloudwatchLogsExports) : new ArrayList<>();
+    }
 
     public List<String> getDbClusterMembers() { return dbClusterMembers; }
     public void setDbClusterMembers(List<String> dbClusterMembers) {

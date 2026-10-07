@@ -4,7 +4,10 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * The placement, encryption and backup settings of a DocumentDB cluster as a request carries
@@ -19,7 +22,20 @@ public record DocDbClusterSettings(String dbSubnetGroupName,
                                    Integer backupRetentionPeriod,
                                    String preferredBackupWindow,
                                    String preferredMaintenanceWindow,
-                                   Boolean deletionProtection) {
+                                   Boolean deletionProtection,
+                                   List<String> enableLogTypes,
+                                   List<String> disableLogTypes) {
+
+    public static final Set<String> LOG_TYPES = Set.of("audit", "profiler");
+
+    public DocDbClusterSettings(String dbSubnetGroupName, String dbClusterParameterGroupName,
+                                List<String> vpcSecurityGroupIds, Boolean storageEncrypted, String kmsKeyId,
+                                Integer backupRetentionPeriod, String preferredBackupWindow,
+                                String preferredMaintenanceWindow, Boolean deletionProtection) {
+        this(dbSubnetGroupName, dbClusterParameterGroupName, vpcSecurityGroupIds, storageEncrypted, kmsKeyId,
+                backupRetentionPeriod, preferredBackupWindow, preferredMaintenanceWindow, deletionProtection,
+                null, null);
+    }
 
     public static DocDbClusterSettings defaults() {
         return new DocDbClusterSettings(null, null, null, null, null, null, null, null, null);
@@ -45,12 +61,26 @@ public record DocDbClusterSettings(String dbSubnetGroupName,
         if (preferredMaintenanceWindow != null) {
             BackupWindows.parseMaintenanceWindow(preferredMaintenanceWindow);
         }
+        requireKnownLogTypes(enableLogTypes);
+        requireKnownLogTypes(disableLogTypes);
+    }
+
+    private static void requireKnownLogTypes(List<String> logTypes) {
+        if (logTypes == null) {
+            return;
+        }
+        for (String logType : logTypes) {
+            if (!LOG_TYPES.contains(logType)) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid log type: " + logType + ". Valid values are audit and profiler.", 400);
+            }
+        }
     }
 
     public DocDbClusterSettings with(String resolvedKmsKeyId, String backupWindow, String maintenanceWindow) {
         return new DocDbClusterSettings(dbSubnetGroupName, dbClusterParameterGroupName, vpcSecurityGroupIds,
                 storageEncrypted, resolvedKmsKeyId, backupRetentionPeriod, backupWindow, maintenanceWindow,
-                deletionProtection);
+                deletionProtection, enableLogTypes, disableLogTypes);
     }
 
     public void applyTo(DocDbCluster cluster) {
@@ -80,6 +110,16 @@ public record DocDbClusterSettings(String dbSubnetGroupName,
         }
         if (deletionProtection != null) {
             cluster.setDeletionProtection(deletionProtection);
+        }
+        if (enableLogTypes != null || disableLogTypes != null) {
+            Set<String> logTypes = new LinkedHashSet<>(cluster.getEnabledCloudwatchLogsExports());
+            if (disableLogTypes != null) {
+                logTypes.removeAll(disableLogTypes);
+            }
+            if (enableLogTypes != null) {
+                logTypes.addAll(enableLogTypes);
+            }
+            cluster.setEnabledCloudwatchLogsExports(new ArrayList<>(logTypes));
         }
     }
 }

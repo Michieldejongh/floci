@@ -376,7 +376,8 @@ public class DocDbService {
         }
         return new DocDbClusterSettings(subnetGroup, parameterGroup, securityGroups,
                 settings.storageEncrypted(), kmsKeyArn, settings.backupRetentionPeriod(),
-                backup, maintenance, settings.deletionProtection());
+                backup, maintenance, settings.deletionProtection(),
+                settings.enableLogTypes(), settings.disableLogTypes());
     }
 
     /** The family of the group a cluster is on; a group deleted since is judged by nothing. */

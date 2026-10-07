@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 
 /**
  * The settings a DocumentDB cluster is created with come back from DescribeDBClusters, as on a
@@ -141,5 +142,80 @@ class DocDbClusterSettingsIntegrationTest {
         .when().post("/")
         .then().statusCode(400)
             .body(containsString("The backup window and maintenance window must not overlap."));
+    }
+
+    @Test
+    void cloudwatchLogsExportsGivenOnCreateComeBackAndModifyEnablesAndDisablesThem() {
+        rds("CreateDBCluster")
+                .formParam("DBClusterIdentifier", ID)
+                .formParam("Engine", "docdb")
+                .formParam("MasterUsername", "u")
+                .formParam("MasterUserPassword", "secret99password")
+                .formParam("EnableCloudwatchLogsExports.member.1", "audit")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnabledCloudwatchLogsExports><member>audit</member></EnabledCloudwatchLogsExports>"));
+
+        rds("DescribeDBClusters").formParam("DBClusterIdentifier", ID)
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnabledCloudwatchLogsExports><member>audit</member></EnabledCloudwatchLogsExports>"));
+
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("BackupRetentionPeriod", "3")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnabledCloudwatchLogsExports><member>audit</member></EnabledCloudwatchLogsExports>"));
+
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("CloudwatchLogsExportConfiguration.EnableLogTypes.member.1", "profiler")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnabledCloudwatchLogsExports><member>audit</member>"
+                    + "<member>profiler</member></EnabledCloudwatchLogsExports>"));
+
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("CloudwatchLogsExportConfiguration.DisableLogTypes.member.1", "audit")
+        .when().post("/")
+        .then().statusCode(200);
+
+        rds("DescribeDBClusters").formParam("DBClusterIdentifier", ID)
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnabledCloudwatchLogsExports><member>profiler</member></EnabledCloudwatchLogsExports>"));
+
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("CloudwatchLogsExportConfiguration.DisableLogTypes.member.1", "profiler")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(not(containsString("EnabledCloudwatchLogsExports")));
+    }
+
+    @Test
+    void anUnknownLogTypeIsRefusedOnCreateAndModify() {
+        rds("CreateDBCluster")
+                .formParam("DBClusterIdentifier", ID)
+                .formParam("Engine", "docdb")
+                .formParam("MasterUsername", "u")
+                .formParam("MasterUserPassword", "secret99password")
+                .formParam("EnableCloudwatchLogsExports.member.1", "slowquery")
+        .when().post("/")
+        .then().statusCode(400)
+            .body(containsString("<Code>InvalidParameterValue</Code>"));
+
+        rds("CreateDBCluster")
+                .formParam("DBClusterIdentifier", ID)
+                .formParam("Engine", "docdb")
+                .formParam("MasterUsername", "u")
+                .formParam("MasterUserPassword", "secret99password")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(not(containsString("EnabledCloudwatchLogsExports")));
+
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("CloudwatchLogsExportConfiguration.EnableLogTypes.member.1", "error")
+        .when().post("/")
+        .then().statusCode(400)
+            .body(containsString("<Code>InvalidParameterValue</Code>"));
     }
 }

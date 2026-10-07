@@ -241,6 +241,8 @@ public class DocDbQueryHandler {
      * The cluster settings a request carries. DBSubnetGroupName, StorageEncrypted and KmsKeyId are
      * fixed at create and not in the ModifyDBCluster shape, so a modify reads the rest only. Port
      * is not taken from the request: the port a cluster reports is the one it is reachable on.
+     * Log exports are named as EnableCloudwatchLogsExports on create and as
+     * CloudwatchLogsExportConfiguration.EnableLogTypes and DisableLogTypes on modify.
      */
     private static DocDbClusterSettings clusterSettings(MultivaluedMap<String, String> params, boolean create) {
         List<String> securityGroups = memberList(params, "VpcSecurityGroupIds.VpcSecurityGroupId.");
@@ -253,7 +255,16 @@ public class DocDbQueryHandler {
                 optionalInt(params.getFirst("BackupRetentionPeriod")),
                 params.getFirst("PreferredBackupWindow"),
                 params.getFirst("PreferredMaintenanceWindow"),
-                optionalBoolean(params.getFirst("DeletionProtection")));
+                optionalBoolean(params.getFirst("DeletionProtection")),
+                create ? optionalMemberList(params, "EnableCloudwatchLogsExports.member.")
+                       : optionalMemberList(params, "CloudwatchLogsExportConfiguration.EnableLogTypes.member."),
+                create ? null : optionalMemberList(params, "CloudwatchLogsExportConfiguration.DisableLogTypes.member."));
+    }
+
+    /** A list the request left out is null, so a modify that names no log types changes none. */
+    private static List<String> optionalMemberList(MultivaluedMap<String, String> params, String prefix) {
+        List<String> values = memberList(params, prefix);
+        return values.isEmpty() ? null : values;
     }
 
     private static DocDbInstanceSettings instanceSettings(MultivaluedMap<String, String> params) {
@@ -328,6 +339,11 @@ public class DocDbQueryHandler {
                 .elem("DBClusterArn", c.getDbClusterArn());
         if (c.getKmsKeyId() != null && !c.getKmsKeyId().isBlank()) {
             xml.elem("KmsKeyId", c.getKmsKeyId());
+        }
+        if (!c.getEnabledCloudwatchLogsExports().isEmpty()) {
+            xml.start("EnabledCloudwatchLogsExports");
+            c.getEnabledCloudwatchLogsExports().forEach(logType -> xml.elem("member", logType));
+            xml.end("EnabledCloudwatchLogsExports");
         }
         xml.start("VpcSecurityGroups");
         for (String groupId : c.getVpcSecurityGroupIds()) {

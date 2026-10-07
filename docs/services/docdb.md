@@ -37,7 +37,10 @@ The management API shares the RDS Query endpoint (`POST /` with an `Action=` par
 `CreateDBCluster` stores `DBSubnetGroupName`, `DBClusterParameterGroupName`, `VpcSecurityGroupIds`,
 `StorageEncrypted`, `KmsKeyId` (resolved to the key ARN), `BackupRetentionPeriod`, both windows,
 `Port`, `DeletionProtection` and `Tags`, and `DescribeDBClusters` returns them; `ModifyDBCluster`
-changes the ones AWS lets change. References are checked as on AWS (the subnet group and cluster
+changes the ones AWS lets change. `EnableCloudwatchLogsExports` (`audit`, `profiler`) is kept and
+returned as `EnabledCloudwatchLogsExports`; `ModifyDBCluster` adds and removes log types through
+`CloudwatchLogsExportConfiguration`, and any other type is refused with `InvalidParameterValue`.
+References are checked as on AWS (the subnet group and cluster
 parameter group are the RDS records, security groups are EC2's, the key must exist and be enabled),
 and so are the windows (30-minute minimum, no overlap). Omitted values take the AWS defaults —
 `default`, `default.docdb<family>`, the VPC's default security group, one day of backups — with
