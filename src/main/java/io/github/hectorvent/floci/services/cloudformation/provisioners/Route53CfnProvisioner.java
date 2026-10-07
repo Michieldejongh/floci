@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Provisions {@code AWS::Route53::HostedZone} and {@code AWS::Route53::RecordSet}.
@@ -239,7 +240,9 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         JsonNode resolved = ctx.engine().resolveNode(props);
         String comment = resolved.path("HostedZoneConfig").path("Comment").asText(null);
         List<VpcAssociation> vpcs = parseVpcs(resolved.path("VPCs"));
-        String callerReference = ctx.stackName() + "/" + resource.getLogicalId();
+        // Unique per create, as CloudFormation's own: stack and logical id alone repeat for every
+        // Cloud Control CreateResource, which has no stack, and for a zone replaced in place.
+        String callerReference = ctx.stackName() + "/" + resource.getLogicalId() + "/" + UUID.randomUUID();
         boolean isTrackedZoneMissing = resource.getPhysicalId() != null
                 && !zoneExists(resource.getPhysicalId());
         if (isTrackedZoneMissing) {
