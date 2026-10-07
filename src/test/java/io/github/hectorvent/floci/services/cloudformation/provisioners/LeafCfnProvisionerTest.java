@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -85,7 +86,8 @@ class LeafCfnProvisionerTest {
             KmsKey key = new KmsKey();
             key.setKeyId("k-123");
             key.setArn("arn:aws:kms:us-east-1:000000000000:key/k-123");
-            when(kms.createKey(eq("a key"), eq(null), any(), eq(REGION))).thenReturn(key);
+            when(kms.createKey(eq("a key"), eq("ENCRYPT_DECRYPT"), eq("SYMMETRIC_DEFAULT"), eq(null), any(),
+                    eq(null), eq(false), eq(REGION))).thenReturn(key);
 
             StackResource r = resource("Key", "AWS::KMS::Key");
             provisioner.provision(r, props("""
@@ -103,13 +105,30 @@ class LeafCfnProvisionerTest {
             KmsKey key = new KmsKey();
             key.setKeyId("k-1");
             ArgumentCaptor<Map<String, String>> tags = ArgumentCaptor.forClass(Map.class);
-            when(kms.createKey(any(), any(), tags.capture(), anyString())).thenReturn(key);
+            when(kms.createKey(any(), any(), any(), any(), tags.capture(), any(), anyBoolean(), anyString()))
+                    .thenReturn(key);
 
             provisioner.provision(resource("Key", "AWS::KMS::Key"), props("""
                     {"Tags": [{"Key": "team", "Value": "core"}]}
                     """), ctx);
 
             assertEquals(Map.of("team", "core"), tags.getValue());
+        }
+
+        @Test
+        void keySpecUsagePolicyAndMultiRegionReachTheService() {
+            KmsKey key = new KmsKey();
+            key.setKeyId("k-sign");
+            when(kms.createKey(any(), any(), any(), any(), any(), any(), anyBoolean(), anyString()))
+                    .thenReturn(key);
+
+            provisioner.provision(resource("Key", "AWS::KMS::Key"), props("""
+                    {"KeySpec": "ECC_NIST_P256", "KeyUsage": "SIGN_VERIFY", "MultiRegion": true,
+                     "KeyPolicy": {"Version": "2012-10-17", "Statement": []}}
+                    """), ctx);
+
+            verify(kms).createKey(null, "SIGN_VERIFY", "ECC_NIST_P256",
+                    "{\"Version\":\"2012-10-17\",\"Statement\":[]}", Map.of(), null, true, REGION);
         }
 
         @Test

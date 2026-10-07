@@ -42,10 +42,24 @@ public class KmsCfnProvisioner implements CfnResourceProvisioner {
     private void provisionKey(StackResource r, JsonNode props, ProvisionContext ctx) {
         String description = ctx.resolveOptional(props, "Description");
         Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, ctx);
-        KmsKey key = kmsService.createKey(description, null, tags, ctx.region());
+        String keyUsage = ctx.resolveOrDefault(props, "KeyUsage", "ENCRYPT_DECRYPT");
+        String keySpec = ctx.resolveOrDefault(props, "KeySpec", "SYMMETRIC_DEFAULT");
+        boolean multiRegion = Boolean.parseBoolean(ctx.resolveOptional(props, "MultiRegion"));
+        String keyPolicy = keyPolicy(props, ctx);
+        KmsKey key = kmsService.createKey(description, keyUsage, keySpec, keyPolicy, tags, null,
+                multiRegion, ctx.region());
         r.setPhysicalId(key.getKeyId());
         r.getAttributes().put("Arn", key.getArn());
         r.getAttributes().put("KeyId", key.getKeyId());
+    }
+
+    /** {@code KeyPolicy} is declared as JSON, so it arrives as an object or as a JSON string. */
+    private String keyPolicy(JsonNode props, ProvisionContext ctx) {
+        JsonNode policy = props != null ? ctx.engine().resolveNode(props.get("KeyPolicy")) : null;
+        if (policy == null || policy.isNull() || policy.isMissingNode()) {
+            return null;
+        }
+        return policy.isTextual() ? policy.asText() : policy.toString();
     }
 
     private void provisionAlias(StackResource r, JsonNode props, ProvisionContext ctx) {
