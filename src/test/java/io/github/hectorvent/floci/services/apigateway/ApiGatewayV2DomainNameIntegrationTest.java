@@ -436,4 +436,23 @@ class ApiGatewayV2DomainNameIntegrationTest {
     private static org.hamcrest.Matcher<Iterable<? super String>> hasItemEqualTo(String value) {
         return org.hamcrest.Matchers.hasItem(equalTo(value));
     }
+
+    @Test
+    @Order(900)
+    void domainNameConfigurationWithoutAnEndpointTypeIsRegional() {
+        String domain = "default-regional.v2-domain-it.example.com";
+        given()
+            .contentType(ContentType.JSON)
+            .body("""
+                    {"domainName":"%s","domainNameConfigurations":[
+                        {"certificateArn":"arn:aws:acm:us-east-1:000000000000:certificate/abc"}]}
+                    """.formatted(domain))
+        .when()
+            .post("/v2/domainnames")
+        .then()
+            .statusCode(201)
+            .body("domainNameConfigurations[0].endpointType", is("REGIONAL"));
+
+        given().when().delete("/v2/domainnames/" + domain).then().statusCode(204);
+    }
 }

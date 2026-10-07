@@ -2090,8 +2090,7 @@ public class ApiGatewayService implements ResourceProvider {
 
     /**
      * Reads the endpoint type from either spelling: REST passes {@code endpointConfiguration.types},
-     * HTTP APIs pass a single {@code endpointType}. REGIONAL is the default an emulated domain gets,
-     * since nothing here fronts it with an edge distribution.
+     * HTTP APIs pass a single {@code endpointType}.
      */
     private static String endpointTypeOf(Map<String, Object> request) {
         Object endpointType = request.get("endpointType");
@@ -2103,7 +2102,11 @@ public class ApiGatewayService implements ResourceProvider {
                 && types.getFirst() instanceof String type && !type.isBlank()) {
             return type;
         }
-        return "REGIONAL";
+        // A REST domain name without an endpoint configuration is edge-optimized on AWS; one that
+        // only carries a regional certificate can only be regional.
+        boolean regionalCertificate = request.get("regionalCertificateArn") != null
+                || request.get("regionalCertificateName") != null;
+        return regionalCertificate ? "REGIONAL" : "EDGE";
     }
 
     public CustomDomain getDomainName(String region, String domainName) {

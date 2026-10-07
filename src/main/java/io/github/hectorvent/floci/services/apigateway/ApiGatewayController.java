@@ -2497,6 +2497,8 @@ public class ApiGatewayController {
             copyIfPresent(configuration, v1Request, "endpointType", "endpointType");
             copyIfPresent(configuration, v1Request, "securityPolicy", "securityPolicy");
         }
+        // API Gateway v2 domain names are regional unless the configuration says otherwise.
+        v1Request.putIfAbsent("endpointType", "REGIONAL");
         return v1Request;
     }
 

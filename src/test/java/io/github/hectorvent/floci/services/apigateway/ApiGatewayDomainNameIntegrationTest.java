@@ -79,6 +79,30 @@ class ApiGatewayDomainNameIntegrationTest {
     }
 
     @Test
+    void domainWithoutAnEndpointConfigurationIsEdgeOptimized() {
+        String domain = "default-edge.apigw-domain-it.example.com";
+        createDomain("""
+                {"domainName":"%s","certificateArn":"%s"}
+                """.formatted(domain, CERTIFICATE_ARN))
+            .body("endpointConfiguration.types[0]", equalTo("EDGE"))
+            .body("distributionDomainName", endsWith(".cloudfront.net"));
+
+        deleteDomain(domain);
+    }
+
+    @Test
+    void domainWithOnlyARegionalCertificateDefaultsToRegional() {
+        String domain = "default-regional.apigw-domain-it.example.com";
+        createDomain("""
+                {"domainName":"%s","regionalCertificateArn":"%s"}
+                """.formatted(domain, CERTIFICATE_ARN))
+            .body("endpointConfiguration.types[0]", equalTo("REGIONAL"))
+            .body("distributionDomainName", nullValue());
+
+        deleteDomain(domain);
+    }
+
+    @Test
     void endpointTypeCanBeMovedFromEdgeToRegional() {
         String domain = "endpoint-type.apigw-domain-it.example.com";
         createDomain("""
