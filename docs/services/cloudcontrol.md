@@ -14,10 +14,11 @@ Cloud Control.
 | Operation | Description |
 | --- | --- |
 | `CreateResource` | Provision a resource of the given `TypeName` from a `DesiredState` JSON document |
+| `UpdateResource` | Apply an RFC 6902 `PatchDocument` to a resource created through Cloud Control |
 | `DeleteResource` | Delete a resource by `TypeName` and `Identifier` |
 | `GetResource` | Read a resource's current properties by `TypeName` and `Identifier` |
 | `ListResources` | List resources of a `TypeName` |
-| `GetResourceRequestStatus` | Poll a `CreateResource`/`DeleteResource` request by its token |
+| `GetResourceRequestStatus` | Poll a `CreateResource`/`UpdateResource`/`DeleteResource` request by its token |
 
 ## Behavior
 
@@ -26,6 +27,17 @@ Cloud Control.
   `GetResourceRequestStatus` with the token until the status is `SUCCESS` or `FAILED`.
   `DeleteResource` is synchronous (deletes are fast enough not to need polling) but
   still returns a `ProgressEvent` for API-shape consistency.
+- **`UpdateResource`**: the `PatchDocument` (all six RFC 6902 operations; a path may omit the
+  leading `/`) is applied to the resource's current model and validated before anything runs. An
+  invalid patch or a failed `test` fails with `InvalidRequestException`, a change to a createOnly
+  property (from the CloudFormation registry schema) with `NotUpdatableException`, and an unknown
+  identifier with `ResourceNotFoundException`. The changed properties are carried onto the desired
+  state the resource was last provisioned from, and the type's CloudFormation provisioner runs its
+  `UpdateStack` update path over the existing physical id, asynchronously like `CreateResource`
+  (`Operation: UPDATE`). The new model and desired state are persisted, so `GetResource` and the
+  next `UpdateResource` see them. Only resources created through Cloud Control can be updated;
+  others fail with `UnsupportedActionException`. An update that would replace the resource under a
+  new identifier fails rather than replacing it, as AWS leaves replacement to the client.
 - **`ListResources` / `GetResource` type coverage**: the read side lists
   `AWS::S3::Bucket`, `AWS::EC2::VPC`, `AWS::EC2::Subnet`, `AWS::EC2::SecurityGroup`,
   `AWS::EC2::Instance`, `AWS::EC2::LaunchTemplate`, `AWS::IAM::Role`, `AWS::IAM::User`,

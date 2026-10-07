@@ -10,8 +10,10 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.cloudformation.CfnCreateOnlyProperties;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -31,9 +33,11 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -46,6 +50,7 @@ import java.util.concurrent.Executors;
 @ApplicationScoped
 public class CloudControlService {
 
+    private static final Logger LOG = Logger.getLogger(CloudControlService.class);
     private static final String DEFAULT_ACCOUNT = "000000000000";
 
     private final S3Service s3Service;
@@ -77,6 +82,8 @@ public class CloudControlService {
      * Entries are dropped when the resource is deleted.
      */
     private final Map<String, CreatedResource> created = new ConcurrentHashMap<>();
+    /** Keys of resources an UpdateResource is running on; a second one is a concurrent operation. */
+    private final Set<String> updating = ConcurrentHashMap.newKeySet();
     private final ExecutorService executor =
             Executors.newFixedThreadPool(4);
 
@@ -93,7 +100,7 @@ public class CloudControlService {
             created.put(createdKey(accountId, persisted.region(), persisted.typeName(), persisted.identifier()),
                     new CreatedResource(persisted.requestToken(), accountId,
                             persisted.attributes() == null ? Map.of() : Map.copyOf(persisted.attributes()),
-                            persisted.model()));
+                            persisted.model(), persisted.desiredState()));
         }
         List<AccountAwareStorageBackend.AccountEntry<PersistedRequest>> persistedRequests =
                 requestStore.scanAllAccountEntries(key -> true);
@@ -125,6 +132,13 @@ public class CloudControlService {
                 persistRequest(new PersistedRequest(normalized, persisted.region(), persisted.desiredStateJson(),
                         persisted.createdAt()));
             }
+            if ("IN_PROGRESS".equals(normalized.operationStatus()) && "UPDATE".equals(normalized.operation())) {
+                // The update ran in a worker that died with the process, and Cloud Control does not
+                // roll a failed update back, so all that can be said is that it did not finish.
+                normalized = normalized.failed("UpdateResource was interrupted by an emulator restart.");
+                persistRequest(new PersistedRequest(normalized, persisted.region(), persisted.desiredStateJson(),
+                        persisted.createdAt()));
+            }
             requests.put(normalized.requestToken(), normalized);
             requestOrder.add(normalized.requestToken());
             if ("IN_PROGRESS".equals(normalized.operationStatus())
@@ -151,16 +165,20 @@ public class CloudControlService {
                                 CreatedResource resource) {
         createdStore.putForAccount(accountId, region + "|" + typeName + "|" + identifier,
                 new PersistedCreatedResource(resource.requestToken(), accountId, region, typeName, identifier,
-                        resource.attributes(), resource.model()));
+                        resource.attributes(), resource.model(), resource.desiredState()));
     }
 
     private void removePersistedCreated(String accountId, String region, String typeName, String identifier) {
         createdStore.deleteForAccount(accountId, region + "|" + typeName + "|" + identifier);
     }
 
-    /** Create-time state for a resource this service provisioned. */
+    /**
+     * State for a resource this service provisioned: its attributes, the model the read path
+     * returns, and the desired state it was last provisioned from, which UpdateResource carries
+     * forward because the model alone can lack required inputs the read side does not report.
+     */
     private record CreatedResource(String requestToken, String accountId,
-                                   Map<String, String> attributes, String model) {}
+                                   Map<String, String> attributes, String model, String desiredState) {}
 
     @RegisterForReflection
     record PersistedRequest(ProgressEvent event, String region, String desiredStateJson, long createdAt) {
@@ -172,7 +190,7 @@ public class CloudControlService {
     @RegisterForReflection
     record PersistedCreatedResource(String requestToken, String accountId, String region, String typeName,
                                             String identifier, Map<String, String> attributes,
-                                            String model) {}
+                                            String model, String desiredState) {}
 
     private static String createdKey(String accountId, String region, String typeName, String identifier) {
         return accountId + "|" + region + "|" + typeName + "|" + identifier;
@@ -263,7 +281,8 @@ public class CloudControlService {
                 } else {
                     String model = resourceModel(region, typeName, resource.getPhysicalId(), props, resource.getAttributes());
                     CreatedResource createdResource = new CreatedResource(token, accountId,
-                            resource.getAttributes() == null ? Map.of() : Map.copyOf(resource.getAttributes()), model);
+                            resource.getAttributes() == null ? Map.of() : Map.copyOf(resource.getAttributes()), model,
+                            desiredStateJson);
                     created.put(createdKey(accountId, region, typeName, resource.getPhysicalId()), createdResource);
                     persistCreated(accountId, region, typeName, resource.getPhysicalId(), createdResource);
                     record(new ProgressEvent(typeName, resource.getPhysicalId(),
@@ -379,6 +398,214 @@ public class CloudControlService {
         removePersistedCreated(accountId, region, typeName, identifier);
         return record(new ProgressEvent(typeName, identifier,
                 UUID.randomUUID().toString(), "DELETE", "SUCCESS", null, null, accountId));
+    }
+
+    /**
+     * Cloud Control {@code UpdateResource}. The patch is applied to the resource's current model,
+     * as AWS does, and validated before anything runs: an invalid patch or a failed {@code test}
+     * is an {@code InvalidRequestException}, a change to a createOnly property a {@code
+     * NotUpdatableException}. What the patch changed is then carried onto the desired state the
+     * resource was last provisioned from, and the type's provisioner runs its update path over the
+     * existing physical id and attributes, asynchronously like a create.
+     */
+    public ProgressEvent updateResource(String region, String accountId, String typeName, String identifier,
+                                        String patchDocument) {
+        JsonNode patch;
+        try {
+            patch = mapper.readTree(patchDocument);
+        } catch (Exception e) {
+            throw new AwsException("InvalidRequestException", "PatchDocument is not valid JSON.", 400);
+        }
+        String key = createdKey(accountId, region, typeName, identifier);
+        // Claimed before the state is read, so a second update cannot start from the desired state
+        // the first one is about to replace.
+        if (!updating.add(key)) {
+            throw new AwsException("ConcurrentOperationException",
+                    "Another resource operation is in progress on " + identifier + ".", 400);
+        }
+        boolean submitted = false;
+        try {
+            CreatedResource state = created.get(key);
+            if (state == null) {
+                // Throws ResourceNotFoundException when nothing by this identifier exists for the account.
+                getResource(region, accountId, typeName, identifier);
+                throw new AwsException("UnsupportedActionException",
+                        "UpdateResource for " + typeName + " supports only resources created through Cloud Control; "
+                        + identifier + " was not.", 400);
+            }
+            JsonNode current = readModel(getResource(region, accountId, typeName, identifier).properties());
+            JsonNode patched;
+            try {
+                patched = JsonPatch.apply(current, patch);
+            } catch (JsonPatch.InvalidPatchException e) {
+                throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+            }
+            if (!patched.isObject()) {
+                throw new AwsException("InvalidRequestException",
+                        "The patched resource model must be a JSON object.", 400);
+            }
+            ObjectNode desired = desiredStateForUpdate(typeName, state, (ObjectNode) current, (ObjectNode) patched);
+            String desiredJson = propertiesString(desired);
+
+            String token = UUID.randomUUID().toString();
+            ProgressEvent pending = new ProgressEvent(typeName, identifier, token, "UPDATE", "IN_PROGRESS",
+                    null, null, accountId);
+            record(pending);
+            persistRequest(new PersistedRequest(pending, region, desiredJson, System.currentTimeMillis()));
+            executor.submit(() -> RequestScopes.runAs(accountId, () -> {
+                try {
+                    runUpdate(region, accountId, typeName, identifier, key, state, desired, desiredJson, pending);
+                } catch (Exception e) {
+                    record(pending.failed(e.getMessage() == null ? e.toString() : e.getMessage()));
+                } finally {
+                    updating.remove(key);
+                }
+            }));
+            submitted = true;
+            return pending;
+        } finally {
+            if (!submitted) {
+                updating.remove(key);
+            }
+        }
+    }
+
+    private void runUpdate(String region, String accountId, String typeName, String identifier, String key,
+                           CreatedResource state, ObjectNode desired, String desiredJson, ProgressEvent pending) {
+        StackResource resource = provisioner.provisionStandalone(typeName, desired, region, accountId,
+                identifier, state.attributes());
+        if (resource == null || "CREATE_FAILED".equals(resource.getStatus())) {
+            String reason = resource == null ? null : resource.getStatusReason();
+            record(pending.failed(reason == null ? "UpdateResource failed for " + identifier + "." : reason));
+            return;
+        }
+        if (!identifier.equals(resource.getPhysicalId())) {
+            // The provisioner replaced the resource under a new identifier. Cloud Control updates in
+            // place and leaves replacement to the client, so take the new entity back out and fail.
+            try {
+                provisioner.deleteStandalone(typeName, resource.getPhysicalId(), region, resource.getAttributes());
+            } catch (Exception e) {
+                LOG.warnv("Could not remove replacement {0} of {1} {2}: {3}",
+                        resource.getPhysicalId(), typeName, identifier, e.getMessage());
+            }
+            record(pending.failed("The update requires replacing " + identifier
+                    + ", which UpdateResource does not do."));
+            return;
+        }
+        if (provisioner.hasReplacementUpdate(resource)) {
+            for (int attempt = 0; attempt < 3; attempt++) {
+                UpdateCleanupResult cleanup = provisioner.completeUpdate(resource);
+                if (!cleanup.applicable() || cleanup.complete()) {
+                    break;
+                }
+            }
+        }
+        provisioner.clearUpdate(resource);
+        Map<String, String> attributes = resource.getAttributes() == null
+                ? Map.of() : Map.copyOf(resource.getAttributes());
+        String model = resourceModel(region, typeName, identifier, desired, attributes);
+        CreatedResource updated = new CreatedResource(state.requestToken(), accountId, attributes, model, desiredJson);
+        created.put(key, updated);
+        persistCreated(accountId, region, typeName, identifier, updated);
+        record(new ProgressEvent(typeName, identifier, pending.requestToken(), "UPDATE", "SUCCESS", null, model,
+                accountId));
+    }
+
+    /**
+     * The desired state to provision an update from: the one the resource was last provisioned
+     * from, with every top-level property the patch changed set or removed. Starting from the
+     * stored desired state matters because the current model can come from the read side, which
+     * omits required inputs (an IAM role's trust policy) that a provisioner would otherwise reset.
+     */
+    private ObjectNode desiredStateForUpdate(String typeName, CreatedResource state, ObjectNode current,
+                                             ObjectNode patched) {
+        ObjectNode stored = state.desiredState() == null ? null : readObject(state.desiredState());
+        Set<String> readOnly = readOnlyProperties(typeName, state.attributes(), stored);
+        Set<String> names = new LinkedHashSet<>();
+        current.fieldNames().forEachRemaining(names::add);
+        patched.fieldNames().forEachRemaining(names::add);
+        ObjectNode desired;
+        if (stored != null) {
+            desired = stored;
+        } else {
+            desired = current.deepCopy();
+            desired.remove(readOnly);
+        }
+        for (String name : names) {
+            JsonNode before = current.get(name);
+            JsonNode after = patched.get(name);
+            if (before == null ? after == null : before.equals(after)) {
+                continue;
+            }
+            if (isCreateOnlyChange(typeName, name, current, patched)) {
+                throw new AwsException("NotUpdatableException",
+                        "Property " + name + " of " + typeName + " is create-only and cannot be updated.", 400);
+            }
+            if (readOnly.contains(name)) {
+                throw new AwsException("InvalidRequestException",
+                        "Property " + name + " of " + typeName + " is read-only and cannot be updated.", 400);
+            }
+            if (after == null) {
+                desired.remove(name);
+            } else {
+                desired.set(name, after.deepCopy());
+            }
+        }
+        return desired;
+    }
+
+    /**
+     * Whether a change to top-level property {@code name} touches a createOnly property. The schema
+     * list can name a nested path ({@code Prop/Sub}), so only that path's change counts; types the
+     * list does not cover fall back to {@link CfnCreateOnlyProperties#isCreateOnly}'s heuristic.
+     */
+    private static boolean isCreateOnlyChange(String typeName, String name, ObjectNode current, ObjectNode patched) {
+        Set<String> createOnly = CfnCreateOnlyProperties.getCreateOnlyProperties(typeName);
+        if (createOnly.contains(name)) {
+            return true;
+        }
+        boolean nested = false;
+        for (String path : createOnly) {
+            if (path.startsWith(name + "/")) {
+                nested = true;
+                String pointer = "/" + path;
+                if (!current.at(pointer).equals(patched.at(pointer))) {
+                    return true;
+                }
+            }
+        }
+        return !nested && createOnly.isEmpty() && CfnCreateOnlyProperties.isCreateOnly(typeName, name);
+    }
+
+    /**
+     * Properties of the model the caller cannot set: the provisioner's attributes and the primary
+     * identifier field, unless the schema lists them createOnly (an SQS queue's QueueName is both
+     * an attribute and an input) or the desired state carried them.
+     */
+    private static Set<String> readOnlyProperties(String typeName, Map<String, String> attributes, ObjectNode stored) {
+        Set<String> readOnly = new LinkedHashSet<>();
+        readOnly.add(primaryIdentifierField(typeName));
+        if (attributes != null) {
+            for (String name : attributes.keySet()) {
+                readOnly.add(name.split("\\.")[0]);
+            }
+        }
+        readOnly.removeIf(name -> CfnCreateOnlyProperties.getCreateOnlyProperties(typeName).contains(name)
+                || (stored != null && stored.has(name)));
+        return readOnly;
+    }
+
+    private JsonNode readModel(String json) {
+        try {
+            return mapper.readTree(json);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InternalFailure", "Stored resource model is not valid JSON.", 500);
+        }
+    }
+
+    private ObjectNode readObject(String json) {
+        JsonNode node = readModel(json);
+        return node instanceof ObjectNode object ? object : mapper.createObjectNode();
     }
 
     /** Compatibility entry point for direct callers without request account context. */

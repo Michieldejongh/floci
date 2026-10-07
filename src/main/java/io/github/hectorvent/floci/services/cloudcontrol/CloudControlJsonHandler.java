@@ -28,6 +28,9 @@ public class CloudControlJsonHandler {
             case "CreateResource" -> progressResponse(
                     service.createResource(region, accountId, required(request, "TypeName"),
                             request.path("DesiredState").asText(null)));
+            case "UpdateResource" -> progressResponse(
+                    service.updateResource(region, accountId, required(request, "TypeName"),
+                            required(request, "Identifier"), required(request, "PatchDocument")));
             case "DeleteResource" -> progressResponse(
                     service.deleteResource(region, accountId, required(request, "TypeName"), required(request, "Identifier")));
             case "GetResourceRequestStatus" -> progressResponse(

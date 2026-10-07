@@ -172,10 +172,22 @@ public class CfnResourceDispatcher {
      */
     public StackResource provisionStandalone(String resourceType, JsonNode properties, String region,
                                              String accountId) {
+        return provisionStandalone(resourceType, properties, region, accountId, null, Map.of());
+    }
+
+    /**
+     * The Cloud Control {@code UpdateResource} path: provisions again over an existing physical id
+     * and the attributes recorded for it, which is the same update path {@code UpdateStack} drives,
+     * so {@link ProvisionContext#isUpdate()} holds and the provisioner updates in place.
+     */
+    public StackResource provisionStandalone(String resourceType, JsonNode properties, String region,
+                                             String accountId, String existingPhysicalId,
+                                             Map<String, String> existingAttributes) {
         CloudFormationTemplateEngine engine = CloudFormationTemplateEngine.standalone(accountId, region,
                 "cloudcontrol", objectMapper,
                 value -> dynamicReferences.resolveDynamicReferences(value, region, false));
-        return provision("resource", resourceType, properties, engine, region, accountId, "cloudcontrol");
+        return provision("resource", resourceType, properties, engine, region, accountId, "cloudcontrol",
+                existingPhysicalId, existingAttributes);
     }
 
     /**

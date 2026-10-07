@@ -291,6 +291,161 @@ class CloudControlIntegrationTest {
                 .body("ProgressEvent.OperationStatus", equalTo("FAILED"));
     }
 
+    @Test
+    void updateResourcePatchesAQueueInPlace() throws Exception {
+        String ct = "application/x-amz-json-1.0";
+        String create = MAPPER.createObjectNode()
+                .put("TypeName", "AWS::SQS::Queue")
+                .put("DesiredState", "{\"QueueName\":\"cc-update-queue\",\"VisibilityTimeout\":30}")
+                .toString();
+        String createToken = cloudControl(ct, "CreateResource", create)
+                .then().statusCode(200).extract().path("ProgressEvent.RequestToken");
+        String queueUrl = awaitIdentifier(createToken, ct);
+        assertThat(queueUrl, containsString("cc-update-queue"));
+
+        ExtractableResponse<Response> pending = cloudControl(ct, "UpdateResource",
+                updateBody("AWS::SQS::Queue", queueUrl,
+                        "[{\"op\":\"replace\",\"path\":\"/VisibilityTimeout\",\"value\":45}]"))
+                .then().statusCode(200).extract();
+        assertEquals("UPDATE", pending.path("ProgressEvent.Operation"));
+        assertEquals(queueUrl, pending.path("ProgressEvent.Identifier"));
+
+        String updateToken = pending.path("ProgressEvent.RequestToken");
+        String resourceModel = awaitSuccess(updateToken, ct).path("ProgressEvent.ResourceModel");
+        JsonNode model = MAPPER.readTree(resourceModel);
+        assertEquals(45, model.path("VisibilityTimeout").asInt());
+        assertEquals("cc-update-queue", model.path("QueueName").asText());
+        assertEquals("45", queueAttribute(queueUrl, "VisibilityTimeout"));
+
+        String described = cloudControl(ct, "GetResource",
+                "{\"TypeName\":\"AWS::SQS::Queue\",\"Identifier\":\"" + queueUrl + "\"}")
+                .then().statusCode(200).extract().asString();
+        JsonNode properties = MAPPER.readTree(MAPPER.readTree(described).path("ResourceDescription").path("Properties").asText());
+        assertEquals(45, properties.path("VisibilityTimeout").asInt());
+
+        // A second update sees the first one's model: the test holds only against 45. The path
+        // without a leading slash is the form the Cloud Control user guide's CLI example uses.
+        String secondToken = cloudControl(ct, "UpdateResource",
+                updateBody("AWS::SQS::Queue", queueUrl,
+                        "[{\"op\":\"test\",\"path\":\"VisibilityTimeout\",\"value\":45},"
+                                + "{\"op\":\"replace\",\"path\":\"VisibilityTimeout\",\"value\":60}]"))
+                .then().statusCode(200).extract().path("ProgressEvent.RequestToken");
+        awaitSuccess(secondToken, ct);
+        assertEquals("60", queueAttribute(queueUrl, "VisibilityTimeout"));
+    }
+
+    @Test
+    void updateResourceRejectsCreateOnlyChangesInvalidPatchesAndUnknownResources() throws Exception {
+        String ct = "application/x-amz-json-1.0";
+        String create = MAPPER.createObjectNode()
+                .put("TypeName", "AWS::SQS::Queue")
+                .put("DesiredState", "{\"QueueName\":\"cc-update-createonly\"}")
+                .toString();
+        String createToken = cloudControl(ct, "CreateResource", create)
+                .then().statusCode(200).extract().path("ProgressEvent.RequestToken");
+        String queueUrl = awaitIdentifier(createToken, ct);
+        assertNotNull(queueUrl);
+
+        assertErrorCode(ct, "CloudApiService.UpdateResource",
+                updateBody("AWS::SQS::Queue", queueUrl,
+                        "[{\"op\":\"replace\",\"path\":\"/QueueName\",\"value\":\"renamed\"}]"),
+                400, "NotUpdatableException");
+        assertErrorCode(ct, "CloudApiService.UpdateResource",
+                updateBody("AWS::SQS::Queue", queueUrl,
+                        "[{\"op\":\"test\",\"path\":\"/QueueName\",\"value\":\"other\"},"
+                                + "{\"op\":\"add\",\"path\":\"/DelaySeconds\",\"value\":5}]"),
+                400, "InvalidRequestException");
+        assertErrorCode(ct, "CloudApiService.UpdateResource",
+                updateBody("AWS::SQS::Queue", queueUrl,
+                        "[{\"op\":\"remove\",\"path\":\"/NoSuchProperty\"}]"),
+                400, "InvalidRequestException");
+        assertErrorCode(ct, "CloudApiService.UpdateResource",
+                updateBody("AWS::SQS::Queue", queueUrl, "not json"), 400, "InvalidRequestException");
+        assertErrorCode(ct, "CloudApiService.UpdateResource",
+                "{\"TypeName\":\"AWS::SQS::Queue\",\"Identifier\":\"" + queueUrl + "\"}",
+                400, "InvalidRequestException");
+        assertErrorCode(ct, "CloudApiService.UpdateResource",
+                updateBody("AWS::SQS::Queue", "http://localhost:4566/000000000000/no-such-queue",
+                        "[{\"op\":\"add\",\"path\":\"/DelaySeconds\",\"value\":5}]"),
+                404, "ResourceNotFoundException");
+        // A rejected patch changes nothing.
+        assertEquals("0", queueAttribute(queueUrl, "DelaySeconds"));
+    }
+
+    @Test
+    void updateResourceIsReflectedOnTheReadSide() throws Exception {
+        String ct = "application/x-amz-json-1.0";
+        String vpcId = awaitIdentifier(createVpcThroughCloudControl(ct, EC2_AUTH, "10.88.0.0/16"), ct);
+        assertNotNull(vpcId);
+        String create = MAPPER.createObjectNode()
+                .put("TypeName", "AWS::EC2::SecurityGroup")
+                .put("DesiredState", MAPPER.createObjectNode()
+                        .put("GroupName", "cc-update-sg")
+                        .put("GroupDescription", "cloud control update")
+                        .put("VpcId", vpcId)
+                        .toString())
+                .toString();
+        String groupId = awaitIdentifier(cloudControl(ct, "CreateResource", create)
+                .then().statusCode(200).extract().path("ProgressEvent.RequestToken"), ct);
+        assertThat(groupId, containsString("sg-"));
+
+        String token = cloudControl(ct, "UpdateResource", updateBody("AWS::EC2::SecurityGroup", groupId,
+                "[{\"op\":\"add\",\"path\":\"/Tags\",\"value\":[{\"Key\":\"env\",\"Value\":\"cc\"}]}]"))
+                .then().statusCode(200).extract().path("ProgressEvent.RequestToken");
+        awaitSuccess(token, ct);
+
+        assertListedWithTag("AWS::EC2::SecurityGroup", groupId, "env", "cc");
+        String described = cloudControl(ct, "GetResource",
+                "{\"TypeName\":\"AWS::EC2::SecurityGroup\",\"Identifier\":\"" + groupId + "\"}")
+                .then().statusCode(200).extract().asString();
+        JsonNode properties = MAPPER.readTree(MAPPER.readTree(described).path("ResourceDescription").path("Properties").asText());
+        assertEquals("cc-update-sg", properties.path("GroupName").asText());
+        assertEquals("env", properties.path("Tags").path(0).path("Key").asText());
+    }
+
+    private Response cloudControl(String ct, String action, String body) {
+        return given().config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                .contentType(ct)
+                .header("X-Amz-Target", "CloudApiService." + action)
+                .body(body)
+                .when().post("/");
+    }
+
+    private static String updateBody(String typeName, String identifier, String patchDocument) {
+        return MAPPER.createObjectNode()
+                .put("TypeName", typeName)
+                .put("Identifier", identifier)
+                .put("PatchDocument", patchDocument)
+                .toString();
+    }
+
+    private ExtractableResponse<Response> awaitSuccess(String token, String ct) throws InterruptedException {
+        ExtractableResponse<Response> pe = null;
+        for (int i = 0; i < 50; i++) {
+            pe = cloudControl(ct, "GetResourceRequestStatus", "{\"RequestToken\":\"" + token + "\"}")
+                    .then().statusCode(200).extract();
+            if (!"IN_PROGRESS".equals(pe.path("ProgressEvent.OperationStatus"))) {
+                break;
+            }
+            Thread.sleep(100);
+        }
+        assertEquals("SUCCESS", pe.path("ProgressEvent.OperationStatus"),
+                "status message: " + pe.path("ProgressEvent.StatusMessage"));
+        return pe;
+    }
+
+    private String queueAttribute(String queueUrl, String attribute) {
+        return given()
+                .formParam("Action", "GetQueueAttributes")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("AttributeName.1", attribute)
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().xmlPath()
+                .getString("GetQueueAttributesResponse.GetQueueAttributesResult.Attribute.find { it.Name == '"
+                        + attribute + "' }.Value");
+    }
+
     private String createVpcThroughCloudControl(String ct, String auth, String cidr) {
         return given().config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
                 .contentType(ct).header("Authorization", auth)

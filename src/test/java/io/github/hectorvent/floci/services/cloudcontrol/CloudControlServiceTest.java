@@ -10,8 +10,10 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
@@ -208,5 +210,194 @@ class CloudControlServiceTest {
         assertEquals("cluster-1", properties.path("ClusterName").asText());
         assertFalse(properties.has("__FlociCreateOnly"));
         assertFalse(properties.has("FlociLogGroupNameMode"));
+    }
+
+    private static final String ACCOUNT = "111111111111";
+    private static final String QUEUE_URL = "http://localhost:4566/111111111111/q";
+
+    private static StackResource queue(String status, Map<String, String> attributes) {
+        StackResource resource = new StackResource();
+        resource.setPhysicalId(QUEUE_URL);
+        resource.setStatus(status);
+        resource.setAttributes(attributes);
+        return resource;
+    }
+
+    private static CloudControlService.ProgressEvent await(CloudControlService service,
+                                                           CloudControlService.ProgressEvent pending)
+            throws InterruptedException {
+        CloudControlService.ProgressEvent current = pending;
+        for (int i = 0; i < 100 && "IN_PROGRESS".equals(current.operationStatus()); i++) {
+            Thread.sleep(10);
+            current = service.requestStatus(ACCOUNT, pending.requestToken());
+        }
+        return current;
+    }
+
+    private static CloudControlService createdQueue(CfnResourceDispatcher provisioner,
+                                                    AccountAwareStorageBackend<CloudControlService.PersistedRequest> requests,
+                                                    AccountAwareStorageBackend<CloudControlService.PersistedCreatedResource> created)
+            throws InterruptedException {
+        when(provisioner.provisionStandalone(eq("AWS::SQS::Queue"), any(), eq("us-east-1"), eq(ACCOUNT)))
+                .thenReturn(queue("CREATE_COMPLETE",
+                        Map.of("Arn", "arn:aws:sqs:us-east-1:111111111111:q", "QueueName", "q", "QueueUrl", QUEUE_URL)));
+        CloudControlService service = new CloudControlService(mock(S3Service.class), mock(Ec2Service.class),
+                mock(IamService.class), provisioner, new ObjectMapper(), requests, created);
+        CloudControlService.ProgressEvent done = await(service, service.createResource("us-east-1", ACCOUNT,
+                "AWS::SQS::Queue", "{\"VisibilityTimeout\":30,\"Tags\":[{\"Key\":\"k\",\"Value\":\"v\"}]}"));
+        assertEquals("SUCCESS", done.operationStatus());
+        return service;
+    }
+
+    @Test
+    void updateResourceProvisionsThePatchedDesiredStateOverTheExistingResource() throws Exception {
+        CfnResourceDispatcher provisioner = mock(CfnResourceDispatcher.class);
+        AccountAwareStorageBackend<CloudControlService.PersistedRequest> requests =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        AccountAwareStorageBackend<CloudControlService.PersistedCreatedResource> created =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        CloudControlService service = createdQueue(provisioner, requests, created);
+        Map<String, String> updatedAttributes = Map.of("Arn", "arn:aws:sqs:us-east-1:111111111111:q",
+                "QueueName", "q", "QueueUrl", QUEUE_URL, "__FlociSqsUpdateSnapshot", "{}");
+        when(provisioner.provisionStandalone(eq("AWS::SQS::Queue"), any(), eq("us-east-1"), eq(ACCOUNT),
+                eq(QUEUE_URL), anyMap())).thenReturn(queue("CREATE_COMPLETE", updatedAttributes));
+
+        CloudControlService.ProgressEvent pending = service.updateResource("us-east-1", ACCOUNT, "AWS::SQS::Queue",
+                QUEUE_URL, "[{\"op\":\"replace\",\"path\":\"/VisibilityTimeout\",\"value\":45},"
+                        + "{\"op\":\"remove\",\"path\":\"/Tags\"}]");
+        assertEquals("UPDATE", pending.operation());
+        assertEquals(QUEUE_URL, pending.identifier());
+        CloudControlService.ProgressEvent done = await(service, pending);
+        assertEquals("SUCCESS", done.operationStatus(), done.statusMessage());
+
+        ArgumentCaptor<JsonNode> props = ArgumentCaptor.forClass(JsonNode.class);
+        verify(provisioner).provisionStandalone(eq("AWS::SQS::Queue"), props.capture(), eq("us-east-1"),
+                eq(ACCOUNT), eq(QUEUE_URL),
+                eq(Map.of("Arn", "arn:aws:sqs:us-east-1:111111111111:q", "QueueName", "q", "QueueUrl", QUEUE_URL)));
+        // Only the inputs: the model's read-only Arn, QueueUrl and Id are not handed back as properties.
+        assertEquals(new ObjectMapper().readTree("{\"VisibilityTimeout\":45}"), props.getValue());
+        verify(provisioner).clearUpdate(any());
+        assertEquals(45, new ObjectMapper().readTree(done.resourceModel()).path("VisibilityTimeout").asInt());
+
+        // The new model, attributes and desired state survive a restart.
+        CloudControlService restarted = new CloudControlService(mock(S3Service.class), mock(Ec2Service.class),
+                mock(IamService.class), provisioner, new ObjectMapper(), requests, created);
+        JsonNode model = new ObjectMapper().readTree(
+                restarted.getResource("us-east-1", ACCOUNT, "AWS::SQS::Queue", QUEUE_URL).properties());
+        assertEquals(45, model.path("VisibilityTimeout").asInt());
+        assertFalse(model.has("Tags"));
+        assertEquals("SUCCESS", restarted.requestStatus(ACCOUNT, pending.requestToken()).operationStatus());
+    }
+
+    @Test
+    void updateResourceKeepsInputsTheReadSideModelDoesNotReport() throws Exception {
+        CfnResourceDispatcher provisioner = mock(CfnResourceDispatcher.class);
+        IamService iamService = mock(IamService.class);
+        IamRole role = new IamRole();
+        role.setRoleName("r");
+        role.setPath("/");
+        role.setArn("arn:aws:iam::111111111111:role/r");
+        when(iamService.listRoles("/")).thenReturn(List.of(role));
+        StackResource resource = new StackResource();
+        resource.setPhysicalId("r");
+        resource.setStatus("CREATE_COMPLETE");
+        resource.setAttributes(Map.of("Arn", "arn:aws:iam::111111111111:role/r", "RoleId", "AROA1"));
+        when(provisioner.provisionStandalone(eq("AWS::IAM::Role"), any(), eq("us-east-1"), eq(ACCOUNT)))
+                .thenReturn(resource);
+        when(provisioner.provisionStandalone(eq("AWS::IAM::Role"), any(), eq("us-east-1"), eq(ACCOUNT),
+                eq("r"), anyMap())).thenReturn(resource);
+        CloudControlService service = new CloudControlService(mock(S3Service.class), mock(Ec2Service.class),
+                iamService, provisioner, new ObjectMapper());
+        await(service, service.createResource("us-east-1", ACCOUNT, "AWS::IAM::Role",
+                "{\"RoleName\":\"r\",\"AssumeRolePolicyDocument\":{\"Version\":\"2012-10-17\"}}"));
+
+        CloudControlService.ProgressEvent done = await(service, service.updateResource("us-east-1", ACCOUNT,
+                "AWS::IAM::Role", "r", "[{\"op\":\"add\",\"path\":\"/Description\",\"value\":\"d\"}]"));
+
+        assertEquals("SUCCESS", done.operationStatus(), done.statusMessage());
+        ArgumentCaptor<JsonNode> props = ArgumentCaptor.forClass(JsonNode.class);
+        verify(provisioner).provisionStandalone(eq("AWS::IAM::Role"), props.capture(), eq("us-east-1"),
+                eq(ACCOUNT), eq("r"), anyMap());
+        // The read side lists only Arn, RoleName and Path; the trust policy comes from the desired state.
+        assertEquals("2012-10-17", props.getValue().path("AssumeRolePolicyDocument").path("Version").asText());
+        assertEquals("d", props.getValue().path("Description").asText());
+    }
+
+    @Test
+    void updateResourceRejectsACreateOnlyChangeBeforeProvisioning() throws Exception {
+        CfnResourceDispatcher provisioner = mock(CfnResourceDispatcher.class);
+        CloudControlService service = createdQueue(provisioner,
+                AccountAwareStorageBackend.inMemory("000000000000"), AccountAwareStorageBackend.inMemory("000000000000"));
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updateResource("us-east-1", ACCOUNT,
+                "AWS::SQS::Queue", QUEUE_URL, "[{\"op\":\"add\",\"path\":\"/FifoQueue\",\"value\":true}]"));
+
+        assertEquals("NotUpdatableException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+        verify(provisioner, never()).provisionStandalone(anyString(), any(), anyString(), anyString(),
+                anyString(), anyMap());
+    }
+
+    @Test
+    void updateResourceRejectsInvalidPatchesAndReadOnlyProperties() throws Exception {
+        CfnResourceDispatcher provisioner = mock(CfnResourceDispatcher.class);
+        CloudControlService service = createdQueue(provisioner,
+                AccountAwareStorageBackend.inMemory("000000000000"), AccountAwareStorageBackend.inMemory("000000000000"));
+
+        for (String patch : List.of("{}", "[{\"op\":\"frobnicate\",\"path\":\"/A\"}]",
+                "[{\"op\":\"replace\",\"path\":\"/Missing\",\"value\":1}]",
+                "[{\"op\":\"test\",\"path\":\"/VisibilityTimeout\",\"value\":31}]",
+                "[{\"op\":\"replace\",\"path\":\"/Arn\",\"value\":\"arn:aws:sqs:us-east-1:111111111111:x\"}]")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.updateResource("us-east-1", ACCOUNT,
+                    "AWS::SQS::Queue", QUEUE_URL, patch), patch);
+            assertEquals("InvalidRequestException", e.getErrorCode(), patch);
+        }
+        verify(provisioner, never()).provisionStandalone(anyString(), any(), anyString(), anyString(),
+                anyString(), anyMap());
+    }
+
+    @Test
+    void updateResourceReportsNotFoundForAnUnknownIdentifier() {
+        CloudControlService service = new CloudControlService(mock(S3Service.class), mock(Ec2Service.class),
+                mock(IamService.class), mock(CfnResourceDispatcher.class), new ObjectMapper());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updateResource("us-east-1", ACCOUNT,
+                "AWS::SQS::Queue", "nope", "[]"));
+
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void updateResourceFailsWhenTheProvisionerFails() throws Exception {
+        CfnResourceDispatcher provisioner = mock(CfnResourceDispatcher.class);
+        CloudControlService service = createdQueue(provisioner,
+                AccountAwareStorageBackend.inMemory("000000000000"), AccountAwareStorageBackend.inMemory("000000000000"));
+        StackResource failed = queue("CREATE_FAILED", Map.of());
+        failed.setStatusReason("boom");
+        when(provisioner.provisionStandalone(eq("AWS::SQS::Queue"), any(), eq("us-east-1"), eq(ACCOUNT),
+                eq(QUEUE_URL), anyMap())).thenReturn(failed);
+
+        CloudControlService.ProgressEvent done = await(service, service.updateResource("us-east-1", ACCOUNT,
+                "AWS::SQS::Queue", QUEUE_URL, "[{\"op\":\"replace\",\"path\":\"/VisibilityTimeout\",\"value\":45}]"));
+
+        assertEquals("FAILED", done.operationStatus());
+        assertEquals("boom", done.statusMessage());
+        assertEquals(30, new ObjectMapper().readTree(service.getResource("us-east-1", ACCOUNT, "AWS::SQS::Queue",
+                QUEUE_URL).properties()).path("VisibilityTimeout").asInt());
+    }
+
+    @Test
+    void anUpdateInterruptedByARestartIsReportedFailed() {
+        AccountAwareStorageBackend<CloudControlService.PersistedRequest> requests =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        requests.putForAccount(ACCOUNT, "tok", new CloudControlService.PersistedRequest(
+                new CloudControlService.ProgressEvent("AWS::SQS::Queue", QUEUE_URL, "tok", "UPDATE", "IN_PROGRESS",
+                        null, null, ACCOUNT), "us-east-1", "{}", 1L));
+
+        CloudControlService restarted = new CloudControlService(mock(S3Service.class), mock(Ec2Service.class),
+                mock(IamService.class), mock(CfnResourceDispatcher.class), new ObjectMapper(), requests,
+                AccountAwareStorageBackend.inMemory("000000000000"));
+
+        assertEquals("FAILED", restarted.requestStatus(ACCOUNT, "tok").operationStatus());
     }
 }
