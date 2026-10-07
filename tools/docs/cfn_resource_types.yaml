@@ -92,7 +92,7 @@ type_order:
     [VPC, Subnet, SecurityGroup, SecurityGroupIngress, SecurityGroupEgress, InternetGateway,
      RouteTable, SubnetRouteTableAssociation, Route, NatGateway, EIP, Instance, LaunchTemplate,
      VPCGatewayAttachment, VPCEndpoint, NetworkAcl, NetworkAclEntry, SubnetNetworkAclAssociation,
-     FlowLog]
+     FlowLog, PrefixList]
   AWS::ElasticLoadBalancingV2: [LoadBalancer, TargetGroup, Listener, ListenerRule]
   AWS::AutoScaling: [LaunchConfiguration, AutoScalingGroup, LifecycleHook]
   AWS::Route53: [HostedZone, RecordSet]

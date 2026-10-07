@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
@@ -172,6 +173,9 @@ public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisione
             }
             pair.setDescription(description);
             perm.getUserIdGroupPairs().add(pair);
+        }
+        if (prefixList != null && !prefixList.isBlank()) {
+            perm.getPrefixListIds().add(new PrefixListId(prefixList, description));
         }
         return perm;
     }

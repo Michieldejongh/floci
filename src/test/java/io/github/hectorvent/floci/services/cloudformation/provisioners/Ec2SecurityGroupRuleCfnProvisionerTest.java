@@ -187,6 +187,30 @@ class Ec2SecurityGroupRuleCfnProvisionerTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void destinationPrefixListBecomesAPrefixListPeer() {
+        when(ec2.authorizeSecurityGroupEgress(eq("us-east-1"), eq("sg-web"), anyList()))
+                .thenReturn(List.of(rule("sgr-pl")));
+        StackResource r = resource(EGRESS, "WebToServers");
+        ObjectNode props = mapper.createObjectNode()
+                .put("GroupId", "sg-web")
+                .put("IpProtocol", "tcp")
+                .put("FromPort", 443)
+                .put("ToPort", 443)
+                .put("Description", "to servers")
+                .put("DestinationPrefixListId", "pl-servers");
+
+        provisioner.provision(r, props, ctx());
+
+        ArgumentCaptor<List<IpPermission>> perms = ArgumentCaptor.forClass(List.class);
+        verify(ec2).authorizeSecurityGroupEgress(eq("us-east-1"), eq("sg-web"), perms.capture());
+        IpPermission perm = perms.getValue().get(0);
+        assertEquals(1, perm.getPrefixListIds().size(), "the prefix list must reach the rule, not be dropped");
+        assertEquals("pl-servers", perm.getPrefixListIds().get(0).getPrefixListId());
+        assertEquals("to servers", perm.getPrefixListIds().get(0).getDescription());
+    }
+
+    @Test
     void missingProtocolDefaultsToAll() {
         when(ec2.authorizeSecurityGroupIngress(eq("us-east-1"), eq("sg-123"), anyList()))
                 .thenReturn(List.of(rule("sgr-all")));

@@ -58,6 +58,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoUs
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2LaunchTemplateCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2NetworkCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2NetworkAclCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2PrefixListCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2SecurityGroupCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2SecurityGroupRuleCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2VpcCfnProvisioner;
@@ -423,6 +424,7 @@ final class CfnProvisionerFixture {
                 discovered.add(new Ec2VpcEndpointCfnProvisioner(ec2Service));
                 discovered.add(new Ec2VpcGatewayAttachmentCfnProvisioner(ec2Service));
                 discovered.add(new Ec2NetworkAclCfnProvisioner(ec2Service));
+                discovered.add(new Ec2PrefixListCfnProvisioner(ec2Service));
                 discovered.add(new Ec2SecurityGroupCfnProvisioner(ec2Service));
                 discovered.add(new Ec2SecurityGroupRuleCfnProvisioner(ec2Service));
                 discovered.add(new Ec2InstanceCfnProvisioner(ec2Service));
