@@ -223,6 +223,7 @@ Schema extensions (`extend type Query { ... }`) are supported natively through g
 | Surface | Path | Content-Types |
 |---|---|---|
 | HTTP GraphQL | `POST /v1/apis/{apiId}/graphql` | `application/json`, `application/graphql` (+ charset) |
+| HTTP GraphQL (GET) | `GET /v1/apis/{apiId}/graphql?query=…&variables=…&operationName=…` | Query parameters; `variables` is a JSON object; signed over an empty body |
 
 Execute is a **separate** data-plane endpoint from the management API. Request body is GraphQL-over-HTTP JSON: `{ "query", "variables?", "operationName?" }`.
 

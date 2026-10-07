@@ -38,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -116,6 +117,41 @@ class AppSyncExecutionControllerTest {
         Map<String, Object> error = ((List<Map<String, Object>>) body.get("errors")).get(0);
         assertEquals("InternalFailure", error.get("errorType"));
         assertEquals("InternalFailure", error.get("message"));
+    }
+
+    @Test
+    void getRequestRunsTheQueryFromQueryParameters() {
+        GraphqlApi api = new GraphqlApi();
+        api.setApiId("api-1");
+        when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);
+        when(authMiddleware.authenticate(any(), any(), any())).thenReturn(authContext(api));
+        when(schemaRegistry.getSdl("api-1")).thenReturn(Optional.of("type Query { hello(name: String): String }"));
+        when(schemaCompiler.withDirectivesAndScalars(any())).thenReturn("prepared-sdl");
+        when(schemaCompiler.scalarKindMapping()).thenReturn(Map.of());
+        when(sidecarClient.plan(any(), any(), any(), any())).thenReturn(new GraphqlSidecarClient.PlanResult("QUERY", List.of()));
+        when(fieldAuthorizationPlanner.planDenyFields(any(), any())).thenReturn(List.of());
+        when(sidecarClient.execute(any(), any(), any(), any(), any(), any()))
+                .thenReturn(Map.of("data", Map.of("hello", "world")));
+
+        Response response = controller.executeGet("api-1", mock(HttpHeaders.class),
+                "query Greet($name: String) { hello(name: $name) }", "{\"name\":\"floci\"}", "Greet");
+
+        assertEquals(200, response.getStatus());
+        verify(sidecarClient).execute(any(), any(), eq(
+                "query Greet($name: String) { hello(name: $name) }"),
+                eq(Map.of("name", "floci")),
+                eq("Greet"), any());
+        ArgumentCaptor<AuthRequestInfo> info = ArgumentCaptor.forClass(AuthRequestInfo.class);
+        verify(authMiddleware).authenticate(any(), any(), info.capture());
+        assertEquals("", info.getValue().rawBody());
+    }
+
+    @Test
+    void getRequestWithoutAQueryIsAnEmptyBody() {
+        Response response = controller.executeGet("api-1", mock(HttpHeaders.class), null, null, null);
+
+        assertEquals(400, response.getStatus());
+        assertEquals("MalformedHttpRequestException", response.getHeaderString("x-amzn-errortype"));
     }
 
     @Test

@@ -23,10 +23,12 @@ import io.github.hectorvent.floci.services.appsync.graphql.resolver.AppSyncResol
 import io.github.hectorvent.floci.services.appsync.graphql.resolver.ResolverCallbackSessions;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -105,12 +107,50 @@ public class AppSyncExecutionController {
     public Response execute(@PathParam("apiId") String apiId,
                             @Context HttpHeaders headers,
                             String body) {
-        try {
-            if (!isAcceptedContentType(headers)) {
+        if (!isAcceptedContentType(headers)) {
+            return graphqlError(400, "MalformedHttpRequestException",
+                    AppSyncErrorFormatter.MSG_UNABLE_TO_PARSE);
+        }
+        return run(apiId, headers, body, body);
+    }
+
+    /**
+     * GraphQL over HTTP GET: the operation comes from the {@code query}, {@code variables} (a JSON
+     * object) and {@code operationName} query parameters instead of a body, and the request is
+     * signed over an empty body.
+     */
+    @GET
+    @Path("/v1/apis/{apiId}/graphql")
+    public Response executeGet(@PathParam("apiId") String apiId,
+                               @Context HttpHeaders headers,
+                               @QueryParam("query") String query,
+                               @QueryParam("variables") String variables,
+                               @QueryParam("operationName") String operationName) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("query", query);
+        if (variables != null && !variables.isBlank()) {
+            try {
+                request.put("variables", objectMapper.readTree(variables));
+            } catch (JsonProcessingException e) {
                 return graphqlError(400, "MalformedHttpRequestException",
                         AppSyncErrorFormatter.MSG_UNABLE_TO_PARSE);
             }
+        }
+        if (operationName != null && !operationName.isBlank()) {
+            request.put("operationName", operationName);
+        }
+        String body;
+        try {
+            body = query == null ? "" : objectMapper.writeValueAsString(request);
+        } catch (JsonProcessingException e) {
+            return graphqlError(400, "MalformedHttpRequestException",
+                    AppSyncErrorFormatter.MSG_UNABLE_TO_PARSE);
+        }
+        return run(apiId, headers, body, "");
+    }
 
+    private Response run(String apiId, HttpHeaders headers, String body, String signedBody) {
+        try {
             ParsedRequest parsed;
             try {
                 parsed = parseBody(body);
@@ -133,7 +173,7 @@ public class AppSyncExecutionController {
             AppSyncAuthContext authContext;
             try {
                 authContext = authMiddleware.authenticate(
-                        headerMap(headers), api, authRequestInfo(parsed, headers, body));
+                        headerMap(headers), api, authRequestInfo(parsed, headers, signedBody));
             } catch (AppSyncTransportException e) {
                 return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
             }
