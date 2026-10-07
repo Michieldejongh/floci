@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -12,14 +13,19 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
+import io.github.hectorvent.floci.services.stepfunctions.model.RoutingConfiguration;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachineAlias;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachineVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -27,7 +33,8 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 
 /**
- * Provisions {@code AWS::StepFunctions::StateMachine}.
+ * Provisions {@code AWS::StepFunctions::StateMachine}, {@code AWS::StepFunctions::StateMachineVersion}
+ * and {@code AWS::StepFunctions::StateMachineAlias}.
  *
  * <p>Extracted from the former CloudFormation monolith. This type carried the last
  * fall-through arm in that class's five update-cleanup hooks, so moving it here reduces every
@@ -39,11 +46,19 @@ import java.util.regex.Pattern;
  * {@code StateMachineName} and {@code StateMachineType} are create-only in the registry schema.
  * The name mode is remembered on the resource because a generated name is otherwise
  * indistinguishable from an explicit one on the next update.
+ *
+ * <p>Every property of a version is create-only, so a version is either the one already published
+ * or a newly published replacement. Publishing is idempotent per revision, as on AWS: a revision
+ * that is already published yields the existing version ARN. An alias updates in place while its
+ * ARN (state machine plus name) stays the same and is replaced otherwise. Replaced versions and
+ * aliases are deleted through the {@link ReplacementCleanup} record once the update commits.
  */
 @ApplicationScoped
 public class StepFunctionsCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String TYPE = "AWS::StepFunctions::StateMachine";
+    private static final String VERSION_TYPE = "AWS::StepFunctions::StateMachineVersion";
+    private static final String ALIAS_TYPE = "AWS::StepFunctions::StateMachineAlias";
 
     private static final Logger LOG = Logger.getLogger(StepFunctionsCfnProvisioner.class);
 
@@ -52,6 +67,8 @@ public class StepFunctionsCfnProvisioner implements CfnResourceProvisioner {
     private static final String NAME_MODE_EXPLICIT = "explicit";
     private static final String NAME_MODE_GENERATED = "generated";
     private static final int STEP_FUNCTIONS_NAME_MAX_LENGTH = 80;
+    private static final String ALIAS_NAME_MODE_ATTR = "FlociStepFunctionsAliasNameMode";
+    private static final String ALIAS_UPDATE_SNAPSHOT_ATTR = "__FlociStepFunctionsAliasUpdateSnapshot";
     /** Mirrors the suffix ProvisionContext.generatePhysicalName appends, so a generated name is recognisable. */
     private static final int GENERATED_NAME_SUFFIX_LENGTH = 12;
 
@@ -72,30 +89,60 @@ public class StepFunctionsCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(TYPE);
+        return Set.of(TYPE, VERSION_TYPE, ALIAS_TYPE);
     }
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
-        requireSupported(r.getResourceType());
-        provisionStateMachine(r, props, ctx);
-    }
-
-    @Override
-    public void delete(String resourceType, String physicalId, String region) {
-        requireSupported(resourceType);
-        stepFunctionsService.deleteStateMachine(physicalId);
-    }
-
-    private static void requireSupported(String resourceType) {
-        if (!TYPE.equals(resourceType)) {
-            throw new IllegalStateException(
-                    "StepFunctionsCfnProvisioner received an unsupported type: " + resourceType);
+        switch (requireSupported(r.getResourceType())) {
+            case VERSION_TYPE -> provisionVersion(r, props, ctx);
+            case ALIAS_TYPE -> provisionAlias(r, props, ctx);
+            default -> provisionStateMachine(r, props, ctx);
         }
     }
 
     @Override
+    public void delete(StackResource resource, String region) {
+        // A dispatcher stub of an alias created nothing, and its id is no ARN the service accepts.
+        if (ALIAS_TYPE.equals(resource.getResourceType())
+                && CfnResourceDispatcher.isStub(resource.getPhysicalId(), resource.getAttributes())) {
+            return;
+        }
+        delete(resource.getResourceType(), resource.getPhysicalId(), region);
+    }
+
+    @Override
+    public void delete(String resourceType, String physicalId, String region) {
+        switch (requireSupported(resourceType)) {
+            // The service treats a version that is gone, or an id that is no version ARN, as
+            // deleted; a version an alias still routes to fails with ConflictException.
+            case VERSION_TYPE -> stepFunctionsService.deleteStateMachineVersion(physicalId);
+            case ALIAS_TYPE -> CfnDeletes.safeDelete("Step Functions alias", physicalId,
+                    () -> stepFunctionsService.deleteStateMachineAlias(physicalId), "ResourceNotFound");
+            default -> stepFunctionsService.deleteStateMachine(physicalId);
+        }
+    }
+
+    private static String requireSupported(String resourceType) {
+        if (!TYPE.equals(resourceType) && !VERSION_TYPE.equals(resourceType)
+                && !ALIAS_TYPE.equals(resourceType)) {
+            throw new IllegalStateException(
+                    "StepFunctionsCfnProvisioner received an unsupported type: " + resourceType);
+        }
+        return resourceType;
+    }
+
+    /** Versions and aliases use the plain replacement record; state machines keep their own snapshot. */
+    private static boolean usesReplacementCleanup(StackResource resource) {
+        return VERSION_TYPE.equals(resource.getResourceType())
+                || ALIAS_TYPE.equals(resource.getResourceType());
+    }
+
+    @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        if (usesReplacementCleanup(resource)) {
+            return ReplacementCleanup.complete(resource, this::delete);
+        }
         String rawSnapshot = resource.getAttributes().get(SFN_UPDATE_SNAPSHOT_ATTR);
         if (rawSnapshot == null) {
             return UpdateCleanupResult.notApplicable();
@@ -150,6 +197,9 @@ public class StepFunctionsCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public String updateCleanupPhysicalId(StackResource resource) {
+        if (usesReplacementCleanup(resource)) {
+            return ReplacementCleanup.cleanupPhysicalId(resource);
+        }
         if ("Retain".equals(resource.getUpdateReplacePolicy())) {
             return null;
         }
@@ -172,6 +222,9 @@ public class StepFunctionsCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public boolean hasReplacementUpdate(StackResource resource) {
+        if (usesReplacementCleanup(resource)) {
+            return ReplacementCleanup.hasReplacement(resource);
+        }
         String rawSnapshot = resource.getAttributes().get(SFN_UPDATE_SNAPSHOT_ATTR);
         if (rawSnapshot == null) {
             return false;
@@ -187,11 +240,24 @@ public class StepFunctionsCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void clearUpdate(StackResource resource) {
+        if (usesReplacementCleanup(resource)) {
+            resource.getAttributes().remove(ALIAS_UPDATE_SNAPSHOT_ATTR);
+            ReplacementCleanup.clear(resource);
+            return;
+        }
         resource.getAttributes().remove(SFN_UPDATE_SNAPSHOT_ATTR);
     }
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
+        if (VERSION_TYPE.equals(resource.getResourceType())) {
+            // A version never changes in place, so only a replacement has anything to undo.
+            ReplacementCleanup.rollback(resource, this::delete);
+            return true;
+        }
+        if (ALIAS_TYPE.equals(resource.getResourceType())) {
+            return rollbackAlias(resource);
+        }
         String rawSnapshot = resource.getAttributes().get(SFN_UPDATE_SNAPSHOT_ATTR);
         if (rawSnapshot == null) {
             return false;
@@ -371,6 +437,168 @@ public class StepFunctionsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Name", sm.getName());
         r.getAttributes().put("StateMachineRevisionId", sm.getRevisionId());
         r.getAttributes().put(SFN_NAME_MODE_ATTR, desiredNameMode);
+    }
+
+    private void provisionVersion(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
+        String stateMachineArn = blankToNull(ctx.resolveOptional(props, "StateMachineArn"));
+        if (stateMachineArn == null) {
+            throw new AwsException("ValidationError", VERSION_TYPE + " requires StateMachineArn", 400);
+        }
+        String revisionId = blankToNull(ctx.resolveOptional(props, "StateMachineRevisionId"));
+        String description = blankToNull(ctx.resolveOptional(props, "Description"));
+        StateMachineVersion version = stepFunctionsService.publishStateMachineVersion(
+                stateMachineArn, revisionId, description);
+        r.setPhysicalId(version.getStateMachineVersionArn());
+        r.getAttributes().put("Arn", version.getStateMachineVersionArn());
+        ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    private void provisionAlias(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(ALIAS_UPDATE_SNAPSHOT_ATTR);
+        Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
+        String explicitName = blankToNull(ctx.resolveOptional(props, "Name"));
+        String description = blankToNull(ctx.resolveOptional(props, "Description"));
+        List<RoutingConfiguration> routing = resolveAliasRouting(props, ctx.engine());
+        String stateMachineArn = baseStateMachineArn(routing.get(0).getStateMachineVersionArn());
+        String name = aliasName(r, ctx, explicitName);
+        String aliasArn = stateMachineArn + ":" + name;
+
+        StateMachineAlias current = ctx.isUpdate() && aliasArn.equals(ctx.priorPhysicalId())
+                ? findAlias(aliasArn)
+                : null;
+        StateMachineAlias alias;
+        if (current != null) {
+            ObjectNode snapshot = objectMapper.createObjectNode();
+            snapshot.put("description", current.getDescription());
+            snapshot.set("routingConfiguration", objectMapper.valueToTree(current.getRoutingConfiguration()));
+            r.getAttributes().put(ALIAS_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+            alias = stepFunctionsService.updateStateMachineAlias(aliasArn, description, true, routing);
+        } else {
+            alias = stepFunctionsService.createStateMachineAlias(name, description, routing);
+        }
+        r.setPhysicalId(alias.getStateMachineAliasArn());
+        r.getAttributes().put("Arn", alias.getStateMachineAliasArn());
+        r.getAttributes().put(ALIAS_NAME_MODE_ATTR,
+                explicitName != null ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED);
+        ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    /**
+     * The template's name when it gives one; otherwise the generated name the alias already has,
+     * unless the previous name was explicit (dropping it replaces the alias on AWS); otherwise a
+     * fresh generated name.
+     */
+    private static String aliasName(StackResource r, ProvisionContext ctx, String explicitName) {
+        if (explicitName != null) {
+            return explicitName;
+        }
+        String prior = ctx.priorPhysicalId();
+        boolean keepsGeneratedName = ctx.isUpdate()
+                && NAME_MODE_GENERATED.equals(r.getAttributes().get(ALIAS_NAME_MODE_ATTR))
+                && !CfnResourceDispatcher.isStub(prior, r.getAttributes());
+        if (keepsGeneratedName) {
+            return prior.substring(prior.lastIndexOf(':') + 1);
+        }
+        return ctx.generatePhysicalName(r.getLogicalId(), STEP_FUNCTIONS_NAME_MAX_LENGTH, false);
+    }
+
+    /**
+     * {@code RoutingConfiguration} as given, or the end state of a {@code DeploymentPreference}:
+     * all traffic on its version. The gradual LINEAR and CANARY shifts are not emulated.
+     */
+    private List<RoutingConfiguration> resolveAliasRouting(JsonNode props, CloudFormationTemplateEngine engine) {
+        JsonNode routingNode = props == null ? null : props.get("RoutingConfiguration");
+        JsonNode preferenceNode = props == null ? null : props.get("DeploymentPreference");
+        boolean hasRouting = routingNode != null && !routingNode.isNull();
+        boolean hasPreference = preferenceNode != null && !preferenceNode.isNull();
+        if (hasRouting == hasPreference) {
+            throw new AwsException("ValidationError", ALIAS_TYPE
+                    + " requires exactly one of RoutingConfiguration or DeploymentPreference", 400);
+        }
+        List<RoutingConfiguration> routing = new ArrayList<>();
+        if (hasPreference) {
+            String versionArn = engine.resolveNode(preferenceNode).path("StateMachineVersionArn").asText(null);
+            if (versionArn == null || versionArn.isBlank()) {
+                throw new AwsException("ValidationError",
+                        "DeploymentPreference requires StateMachineVersionArn", 400);
+            }
+            routing.add(new RoutingConfiguration(versionArn, 100));
+            return routing;
+        }
+        JsonNode resolved = engine.resolveNode(routingNode);
+        if (resolved == null || !resolved.isArray() || resolved.isEmpty()) {
+            throw new AwsException("ValidationError", "RoutingConfiguration must be a non-empty list", 400);
+        }
+        for (JsonNode route : resolved) {
+            String versionArn = route.path("StateMachineVersionArn").asText(null);
+            String weight = route.path("Weight").asText(null);
+            if (versionArn == null || versionArn.isBlank() || weight == null) {
+                throw new AwsException("ValidationError",
+                        "Each RoutingConfiguration entry requires StateMachineVersionArn and Weight", 400);
+            }
+            try {
+                routing.add(new RoutingConfiguration(versionArn, Integer.parseInt(weight.trim())));
+            } catch (NumberFormatException e) {
+                throw new AwsException("ValidationError",
+                        "RoutingConfiguration Weight must be an integer, got " + weight, 400);
+            }
+        }
+        return routing;
+    }
+
+    /** The state machine ARN a version ARN ({@code <stateMachineArn>:<version>}) belongs to. */
+    private static String baseStateMachineArn(String versionArn) {
+        int qualifier = versionArn.lastIndexOf(':');
+        String base = qualifier > 0 ? versionArn.substring(0, qualifier) : versionArn;
+        if (!base.contains(":stateMachine:")) {
+            throw new AwsException("InvalidArn", "Invalid state machine version ARN: " + versionArn, 400);
+        }
+        return base;
+    }
+
+    private StateMachineAlias findAlias(String aliasArn) {
+        try {
+            return stepFunctionsService.describeStateMachineAlias(aliasArn);
+        } catch (AwsException e) {
+            if ("ResourceNotFound".equals(e.getErrorCode())) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Undoes a replacement through the cleanup record, and an in-place update from the snapshot
+     * taken before it. The snapshot is spent only once the restore succeeded.
+     */
+    private boolean rollbackAlias(StackResource resource) {
+        if (ReplacementCleanup.rollback(resource, this::delete)) {
+            return true;
+        }
+        String raw = resource.getAttributes().get(ALIAS_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return true;
+        }
+        try {
+            JsonNode snapshot = objectMapper.readTree(raw);
+            List<RoutingConfiguration> routing = new ArrayList<>();
+            for (JsonNode route : snapshot.path("routingConfiguration")) {
+                routing.add(objectMapper.treeToValue(route, RoutingConfiguration.class));
+            }
+            stepFunctionsService.updateStateMachineAlias(resource.getPhysicalId(),
+                    snapshot.path("description").asText(null), true, routing);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException(
+                    "Could not read the alias update snapshot for " + resource.getLogicalId(), e);
+        }
+        resource.getAttributes().remove(ALIAS_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
 

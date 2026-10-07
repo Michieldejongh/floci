@@ -709,6 +709,14 @@
     "StateMachineName",
     "StateMachineType"
   ],
+  "AWS::StepFunctions::StateMachineAlias": [
+    "Name"
+  ],
+  "AWS::StepFunctions::StateMachineVersion": [
+    "Description",
+    "StateMachineArn",
+    "StateMachineRevisionId"
+  ],
   "AWS::WAFv2::WebACL": [
     "Name",
     "Scope"
