@@ -572,6 +572,63 @@ public class AppSyncController {
         return Response.noContent().build();
     }
 
+    // ──────────────────────────── Event APIs ────────────────────────────
+    // AWS serves these on /v2/apis, which API Gateway v2 also claims; AppSyncEventApiRouteFilter
+    // moves AppSync-signed requests onto this internal prefix before routing.
+
+    @POST
+    @Path(AppSyncEventApiRouteFilter.INTERNAL_PREFIX + "/v2/apis")
+    public Response createApi(@Context HttpHeaders headers, String body) throws IOException {
+        String region = regionResolver.resolveRegion(headers);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> request = objectMapper.readValue(body, Map.class);
+        EventApi api = service.createApi(request, region);
+        ObjectNode root = objectMapper.createObjectNode();
+        root.set("api", objectMapper.valueToTree(api));
+        return Response.ok(root).build();
+    }
+
+    @GET
+    @Path(AppSyncEventApiRouteFilter.INTERNAL_PREFIX + "/v2/apis/{apiId}")
+    public Response getApi(@PathParam("apiId") String apiId) {
+        ObjectNode root = objectMapper.createObjectNode();
+        root.set("api", objectMapper.valueToTree(service.getApi(apiId)));
+        return Response.ok(root).build();
+    }
+
+    @POST
+    @Path(AppSyncEventApiRouteFilter.INTERNAL_PREFIX + "/v2/apis/{apiId}")
+    public Response updateApi(@PathParam("apiId") String apiId, String body) throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> request = objectMapper.readValue(body, Map.class);
+        ObjectNode root = objectMapper.createObjectNode();
+        root.set("api", objectMapper.valueToTree(service.updateApi(apiId, request)));
+        return Response.ok(root).build();
+    }
+
+    @DELETE
+    @Path(AppSyncEventApiRouteFilter.INTERNAL_PREFIX + "/v2/apis/{apiId}")
+    public Response deleteApi(@PathParam("apiId") String apiId) {
+        service.deleteApi(apiId);
+        return Response.noContent().build();
+    }
+
+    @GET
+    @Path(AppSyncEventApiRouteFilter.INTERNAL_PREFIX + "/v2/apis")
+    public Response listApis(@QueryParam("maxResults") Integer maxResults,
+                             @QueryParam("nextToken") String nextToken) {
+        AppSyncService.Page<EventApi> page = service.listApis(maxResults, nextToken);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("apis");
+        page.items().forEach(api -> items.add(objectMapper.valueToTree(api)));
+        if (page.nextToken() != null) {
+            root.put("nextToken", page.nextToken());
+        } else {
+            root.putNull("nextToken");
+        }
+        return Response.ok(root).build();
+    }
+
     // ──────────────────────────── Channel Namespaces ────────────────────────────
 
     @POST

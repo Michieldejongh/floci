@@ -3,7 +3,7 @@
 **Protocol:** REST JSON
 **Endpoint:** `http://localhost:4566/v1/apis/...`
 
-Floci implements the AWS AppSync Management API, providing local emulation of GraphQL API configuration, schema management, data source binding, resolver mapping, API key provisioning, custom domains, and channel namespaces.
+Floci implements the AWS AppSync Management API, providing local emulation of GraphQL API configuration, schema management, data source binding, resolver mapping, API key provisioning, custom domains, Event APIs, and their channel namespaces.
 
 ## OIDC issuer network policy
 
@@ -116,13 +116,33 @@ As on AWS, `ApiKey.id` is the key value itself (`da2-` followed by 26 lowercase 
 | `DisassociateApi` | Disassociate a domain name from a GraphQL API |
 | `ListApiAssociations` | List all associations for an API |
 
+### Event APIs
+
+| Operation | Description |
+|---|---|
+| `CreateApi` | Create an Event API with its `eventConfig` (auth providers, connection, default publish and subscribe auth modes, log config) and tags |
+| `GetApi` | Get an Event API by ID |
+| `UpdateApi` | Update an Event API's name, owner contact and `eventConfig` |
+| `DeleteApi` | Delete an Event API and its channel namespaces |
+| `ListApis` | List all Event APIs |
+
+Event APIs share the `/v2/apis` and `/v2/apis/{apiId}` paths with API Gateway v2. Floci routes a
+request to AppSync when its SigV4 signature names the `appsync` service, which every AWS SDK and
+the AWS CLI do, and to API Gateway v2 otherwise.
+
+`dns.HTTP` and `dns.REALTIME` are `<host:port>/v2/apis/<apiId>` taken from `floci.base-url`, not
+the per-API `appsync-api` hostnames AWS hands out, because Floci serves every API on one host.
+Only the control plane is emulated: there is no HTTP publish or WebSocket endpoint for events yet.
+An auth mode must name a type that one of the API's `authProviders` configures, otherwise the
+request is a `BadRequestException`.
+
 ### Channel Namespaces
 
 | Operation | Description |
 |---|---|
-| `CreateChannelNamespace` | Create a channel namespace |
+| `CreateChannelNamespace` | Create a channel namespace with code handlers, handler configs, publish and subscribe auth modes and tags |
 | `GetChannelNamespace` | Get a channel namespace by name |
-| `UpdateChannelNamespace` | Update a channel namespace description |
+| `UpdateChannelNamespace` | Update a channel namespace's description, code handlers, handler configs and auth modes |
 | `ListChannelNamespaces` | List all channel namespaces for an API |
 | `DeleteChannelNamespace` | Delete a channel namespace |
 
@@ -497,7 +517,16 @@ Deleting a GraphQL API (`DeleteGraphqlApi`) automatically deletes all child reso
 - All channel namespaces
 - All domain name associations
 
-This matches AWS behavior where deleting an API removes its entire configuration.
+This matches AWS behavior where deleting an API removes its entire configuration. Deleting an
+Event API (`DeleteApi`) likewise deletes its channel namespaces.
+
+## CloudFormation
+
+`AWS::AppSync::Api` and `AWS::AppSync::ChannelNamespace` are provisioned through the Event API
+control plane above, from a stack or from Cloud Control. As in the registry schemas, `Ref` is the
+`ApiArn` and the `ChannelNamespaceArn`. `AWS::AppSync::Api` exposes `ApiId`, `ApiArn`, `Dns.Http`
+and `Dns.Realtime` to `Fn::GetAtt`; `AWS::AppSync::ChannelNamespace` exposes `ChannelNamespaceArn`.
+`CodeS3Location` is not supported: give the handler code inline in `CodeHandlers`.
 
 ## Not Implemented
 

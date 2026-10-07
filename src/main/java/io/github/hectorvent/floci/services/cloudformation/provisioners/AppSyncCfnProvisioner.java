@@ -5,7 +5,9 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.model.ApiKey;
+import io.github.hectorvent.floci.services.appsync.model.ChannelNamespace;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
+import io.github.hectorvent.floci.services.appsync.model.EventApi;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import io.github.hectorvent.floci.services.appsync.model.Resolver;
@@ -23,6 +25,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Provisions the AppSync resource types a GraphQL API is deployed from: the API itself, its schema,
@@ -51,6 +55,11 @@ import java.util.Set;
  * attributes at create time and read back on update and delete, hence the
  * {@code delete(StackResource, String)} override.
  *
+ * <p><b>Event APIs</b> ({@code AWS::AppSync::Api}, {@code AWS::AppSync::ChannelNamespace}) are
+ * identified by ARN, as their registry schemas' primary identifiers say: {@code Ref} is the
+ * {@code ApiArn} or {@code ChannelNamespaceArn}. The ids needed on the control plane are recorded
+ * as attributes and, for a Cloud Control delete that has none, parsed back out of the ARN.
+ *
  * <p><b>Inline definitions only.</b> {@code DefinitionS3Location} and {@code CodeS3Location} are
  * refused with a clear message rather than silently producing an API with an empty schema or a
  * resolver with no code. Serverless Framework and the AppSync plugins inline both.
@@ -66,6 +75,13 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
     private static final String FUNCTION_CONFIGURATION = "AWS::AppSync::FunctionConfiguration";
     private static final String RESOLVER = "AWS::AppSync::Resolver";
     private static final String API_KEY = "AWS::AppSync::ApiKey";
+    private static final String EVENT_API = "AWS::AppSync::Api";
+    private static final String CHANNEL_NAMESPACE = "AWS::AppSync::ChannelNamespace";
+
+    /** {@code arn:<partition>:appsync:<region>:<account>:apis/<apiId>[/channelNamespaces/<name>]}. */
+    private static final Pattern EVENT_ARN = Pattern.compile(
+            "^arn:" + AwsArnUtils.PARTITION_REGEX
+                    + ":appsync:[^:]*:[^:]*:apis/([^/]+)(?:/channelNamespaces/([^/]+))?$");
 
     /** The service's own "already gone", tolerated on delete and nothing else. */
     private static final String NOT_FOUND = "NotFoundException";
@@ -95,7 +111,8 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(GRAPHQL_API, GRAPHQL_SCHEMA, DATA_SOURCE, FUNCTION_CONFIGURATION, RESOLVER, API_KEY);
+        return Set.of(GRAPHQL_API, GRAPHQL_SCHEMA, DATA_SOURCE, FUNCTION_CONFIGURATION, RESOLVER, API_KEY,
+                EVENT_API, CHANNEL_NAMESPACE);
     }
 
     @Override
@@ -107,6 +124,8 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
             case FUNCTION_CONFIGURATION -> provisionFunction(r, props, ctx);
             case RESOLVER -> provisionResolver(r, props, ctx);
             case API_KEY -> provisionApiKey(r, props, ctx);
+            case EVENT_API -> provisionEventApi(r, props, ctx);
+            case CHANNEL_NAMESPACE -> provisionChannelNamespace(r, props, ctx);
             default -> throw new IllegalStateException(
                     "AppSyncCfnProvisioner cannot handle " + r.getResourceType());
         }
@@ -325,6 +344,128 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("ApiId", apiId);
     }
 
+    // ── Api (Event API) ──────────────────────────────────────────────────────
+
+    private void provisionEventApi(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, Object> req = camelisedProperties(props, ctx);
+        // Read-only properties a desired state may echo back; never request members.
+        req.remove("apiId");
+        req.remove("apiArn");
+        req.remove("dns");
+        req.remove("tags");
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        if (blank(str(req.get("name")))) {
+            req.put("name", firstNonBlank(attribute(r, "Name"),
+                    ctx.generatePhysicalName(r.getLogicalId(), 50, false)));
+        }
+
+        EventApi api;
+        String priorApiId = ctx.isUpdate() ? eventApiId(r, ctx.priorPhysicalId()) : null;
+        if (!blank(priorApiId)) {
+            // UpdateApi replaces eventConfig and ownerContact when sent, so a property the template
+            // dropped is sent as null to clear it.
+            req.putIfAbsent("ownerContact", null);
+            req.putIfAbsent("eventConfig", null);
+            api = appSyncService.updateApi(priorApiId, req);
+            reconcileTags(api.getApiArn(), api.getTags(), tags);
+            api = appSyncService.getApi(priorApiId);
+        } else {
+            if (!tags.isEmpty()) {
+                req.put("tags", tags);
+            }
+            api = appSyncService.createApi(req, ctx.region());
+        }
+
+        r.setPhysicalId(api.getApiArn());
+        r.getAttributes().put("ApiId", api.getApiId());
+        r.getAttributes().put("ApiArn", api.getApiArn());
+        r.getAttributes().put("Name", api.getName());
+        Map<String, String> dns = api.getDns() == null ? Map.of() : api.getDns();
+        if (!blank(dns.get("HTTP"))) {
+            r.getAttributes().put("Dns.Http", dns.get("HTTP"));
+        }
+        if (!blank(dns.get("REALTIME"))) {
+            r.getAttributes().put("Dns.Realtime", dns.get("REALTIME"));
+        }
+    }
+
+    /** Drives an Event API's tags to the template's set: UpdateApi has no tags member. */
+    private void reconcileTags(String apiArn, Map<String, String> current, Map<String, String> desired) {
+        List<String> removed = new ArrayList<>();
+        if (current != null) {
+            current.keySet().stream().filter(k -> !desired.containsKey(k)).forEach(removed::add);
+        }
+        if (!removed.isEmpty()) {
+            appSyncService.untagResource(apiArn, removed);
+        }
+        if (!desired.isEmpty()) {
+            appSyncService.tagResource(apiArn, desired);
+        }
+    }
+
+    // ── ChannelNamespace ─────────────────────────────────────────────────────
+
+    private void provisionChannelNamespace(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, Object> req = camelisedProperties(props, ctx);
+        String apiId = requiredApiId(req, CHANNEL_NAMESPACE);
+        req.remove("channelNamespaceArn");
+        if (req.get("codeS3Location") != null) {
+            throw new AwsException("ValidationError", CHANNEL_NAMESPACE
+                    + " CodeS3Location is not supported by Floci; give the handler code inline in"
+                    + " CodeHandlers instead.", 400);
+        }
+        req.remove("codeS3Location");
+        req.remove("tags");
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        String name = str(req.get("name"));
+        if (blank(name)) {
+            // Name is create-only: an unnamed namespace keeps the name it already has on update.
+            name = firstNonBlank(attribute(r, "Name"),
+                    ctx.generatePhysicalName(r.getLogicalId(), 50, true));
+            req.put("name", name);
+        }
+
+        ChannelNamespace ns;
+        if (reusesEntity(r, ctx, apiId) && name.equals(attribute(r, "Name"))) {
+            // Every mutable property is sent, absent ones as null, so a dropped one is cleared.
+            for (String member : List.of("codeHandlers", "handlerConfigs", "publishAuthModes",
+                    "subscribeAuthModes")) {
+                req.putIfAbsent(member, null);
+            }
+            req.put("tags", tags);
+            ns = appSyncService.updateChannelNamespace(apiId, name, req);
+        } else {
+            if (!tags.isEmpty()) {
+                req.put("tags", tags);
+            }
+            ns = appSyncService.createChannelNamespace(apiId, req);
+        }
+
+        r.setPhysicalId(ns.getChannelNamespaceArn());
+        r.getAttributes().put("ChannelNamespaceArn", ns.getChannelNamespaceArn());
+        r.getAttributes().put("ApiId", apiId);
+        r.getAttributes().put("Name", ns.getName());
+    }
+
+    /** The Event API id: the recorded attribute, else the id inside the ARN physical id. */
+    private static String eventApiId(StackResource r, String physicalId) {
+        String recorded = attribute(r, "ApiId");
+        if (!blank(recorded)) {
+            return recorded;
+        }
+        Matcher matcher = blank(physicalId) ? null : EVENT_ARN.matcher(physicalId);
+        return matcher != null && matcher.matches() ? matcher.group(1) : null;
+    }
+
+    private static String channelNamespaceName(StackResource r, String physicalId) {
+        String recorded = attribute(r, "Name");
+        if (!blank(recorded)) {
+            return recorded;
+        }
+        Matcher matcher = blank(physicalId) ? null : EVENT_ARN.matcher(physicalId);
+        return matcher != null && matcher.matches() ? matcher.group(2) : null;
+    }
+
     // ── Deletes ──────────────────────────────────────────────────────────────
 
     /**
@@ -356,6 +497,16 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
                             fieldName));
             case API_KEY -> deleteChild(r, apiId, "API key", physicalId,
                     keyId -> appSyncService.deleteApiKey(apiId, keyId));
+            case EVENT_API -> {
+                String eventApiId = eventApiId(r, physicalId);
+                deleteChild(r, eventApiId, "Event API", eventApiId,
+                        id -> appSyncService.deleteApi(id));
+            }
+            case CHANNEL_NAMESPACE -> {
+                String parentApiId = eventApiId(r, physicalId);
+                deleteChild(r, parentApiId, "channel namespace", channelNamespaceName(r, physicalId),
+                        name -> appSyncService.deleteChannelNamespace(parentApiId, name));
+            }
             default -> LOG.warnv("No delete implemented for {0}", r.getResourceType());
         }
     }

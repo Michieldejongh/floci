@@ -98,7 +98,7 @@ type_order:
   AWS::Route53: [HostedZone, RecordSet]
   AWS::ApiGateway: [RestApi, Resource, Authorizer, Method, Deployment, Stage, Account, DomainName, BasePathMapping, GatewayResponse]
   AWS::ApiGatewayV2: [Api, Authorizer, Route, Integration, Stage, Deployment]
-  AWS::AppSync: [GraphQLApi, GraphQLSchema, DataSource, FunctionConfiguration, Resolver, ApiKey]
+  AWS::AppSync: [GraphQLApi, GraphQLSchema, DataSource, FunctionConfiguration, Resolver, ApiKey, Api, ChannelNamespace]
   AWS::CodePipeline: [Pipeline, CustomActionType, Webhook]
   AWS::Batch: [ComputeEnvironment, JobQueue, JobDefinition]
   AWS::Cognito: [UserPool, UserPoolClient]

@@ -51,6 +51,7 @@ public class AppSyncService {
     private final StorageBackend<String, DomainName> domainStore;
     private final StorageBackend<String, String> associationStore;
     private final StorageBackend<String, ChannelNamespace> channelNamespaceStore;
+    private final StorageBackend<String, EventApi> eventApiStore;
     private final StorageBackend<String, SourceApiAssociation> mergedApiAssociationStore;
     private final RegionResolver regionResolver;
     private final SchemaRegistry schemaRegistry;
@@ -81,6 +82,7 @@ public class AppSyncService {
         this.domainStore = storageFactory.create("appsync", "appsync-domainnames.json", new TypeReference<>() {});
         this.associationStore = storageFactory.create("appsync", "appsync-associations.json", new TypeReference<>() {});
         this.channelNamespaceStore = storageFactory.create("appsync", "appsync-channelnamespaces.json", new TypeReference<>() {});
+        this.eventApiStore = storageFactory.create("appsync", "appsync-event-apis.json", new TypeReference<>() {});
         this.mergedApiAssociationStore = storageFactory.create("appsync", "appsync-merged-api-associations.json", new TypeReference<>() {});
         this.regionResolver = regionResolver;
         this.schemaRegistry = schemaRegistry;
@@ -690,11 +692,24 @@ public class AppSyncService {
 
     public Map<String, String> getTags(String resourceArn) {
         String apiId = extractApiIdFromArn(resourceArn);
+        Optional<EventApi> eventApi = eventApiStore.get(apiId);
+        if (eventApi.isPresent()) {
+            return eventApi.get().getTags() == null ? Map.of() : eventApi.get().getTags();
+        }
         return getGraphqlApi(apiId).getTags();
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
         String apiId = extractApiIdFromArn(resourceArn);
+        Optional<EventApi> eventApi = eventApiStore.get(apiId);
+        if (eventApi.isPresent()) {
+            EventApi api = eventApi.get();
+            Map<String, String> merged = api.getTags() == null ? new HashMap<>() : new HashMap<>(api.getTags());
+            merged.putAll(tags);
+            api.setTags(merged);
+            eventApiStore.put(apiId, api);
+            return;
+        }
         GraphqlApi api = getGraphqlApi(apiId);
         api.getTags().putAll(tags);
         apiStore.put(apiId, api);
@@ -702,6 +717,17 @@ public class AppSyncService {
 
     public void untagResource(String resourceArn, List<String> tagKeys) {
         String apiId = extractApiIdFromArn(resourceArn);
+        Optional<EventApi> eventApi = eventApiStore.get(apiId);
+        if (eventApi.isPresent()) {
+            EventApi api = eventApi.get();
+            if (api.getTags() != null) {
+                Map<String, String> remaining = new HashMap<>(api.getTags());
+                tagKeys.forEach(remaining::remove);
+                api.setTags(remaining);
+                eventApiStore.put(apiId, api);
+            }
+            return;
+        }
         GraphqlApi api = getGraphqlApi(apiId);
         tagKeys.forEach(api.getTags()::remove);
         apiStore.put(apiId, api);
@@ -823,11 +849,155 @@ public class AppSyncService {
         associationStore.delete(domainName);
     }
 
+    // ──────────────────────────── Event APIs ────────────────────────────
+
+    public EventApi createApi(Map<String, Object> request, String region) {
+        String name = requireEventApiName(request.get("name"));
+        String apiId = generateApiId();
+        EventApi api = new EventApi();
+        api.setApiId(apiId);
+        api.setName(name);
+        api.setOwnerContact(coerceString(request.get("ownerContact")));
+        api.setEventConfig(parseEventConfig(request.get("eventConfig")));
+        api.setApiArn(buildApiArn(apiId, region));
+        api.setDns(eventApiDns(apiId));
+        api.setCreated(clock.instant().getEpochSecond());
+        api.setXrayEnabled(false);
+        Map<String, Object> tags = castMap(request.get("tags"));
+        if (tags != null) {
+            Map<String, String> tagMap = new HashMap<>();
+            tags.forEach((k, v) -> tagMap.put(k, v != null ? String.valueOf(v) : ""));
+            api.setTags(tagMap);
+        }
+        eventApiStore.put(apiId, api);
+        LOG.infov("Created Event API {0}: {1}", apiId, name);
+        return api;
+    }
+
+    public EventApi getApi(String apiId) {
+        return eventApiStore.get(apiId)
+                .map(this::refreshEventApiDns)
+                .orElseThrow(() -> new AwsException("NotFoundException", "API not found: " + apiId, 404));
+    }
+
+    public Page<EventApi> listApis(Integer maxResults, String nextToken) {
+        List<EventApi> apis = eventApiStore.scan(k -> true);
+        apis.forEach(this::refreshEventApiDns);
+        return paginate(apis, nextToken, maxResults);
+    }
+
+    /** UpdateApi: {@code name} is required, {@code ownerContact} and {@code eventConfig} replace when sent. */
+    public EventApi updateApi(String apiId, Map<String, Object> request) {
+        EventApi existing = getApi(apiId);
+        existing.setName(requireEventApiName(request.get("name")));
+        if (request.containsKey("ownerContact")) {
+            existing.setOwnerContact(coerceString(request.get("ownerContact")));
+        }
+        if (request.containsKey("eventConfig")) {
+            existing.setEventConfig(parseEventConfig(request.get("eventConfig")));
+        }
+        eventApiStore.put(apiId, existing);
+        return existing;
+    }
+
+    public void deleteApi(String apiId) {
+        getApi(apiId);
+        eventApiStore.delete(apiId);
+        deleteChannelNamespacesForApi(apiId);
+        LOG.infov("Deleted Event API {0}", apiId);
+    }
+
+    private static final Pattern EVENT_API_NAME = Pattern.compile("[A-Za-z0-9_\\- ]{1,50}");
+
+    private String requireEventApiName(Object value) {
+        String name = coerceString(value);
+        if (name == null || name.isBlank()) {
+            throw new AwsException("BadRequestException", "An API name is required", 400);
+        }
+        if (!EVENT_API_NAME.matcher(name).matches()) {
+            throw new AwsException("BadRequestException",
+                    "Invalid API name: must be 1-50 characters of letters, digits, '_', '-' or space", 400);
+        }
+        return name;
+    }
+
+    /**
+     * The model's EventConfig: the four auth lists are required members, and every auth mode must
+     * name a type that one of the API's auth providers configures, which is what AWS validates.
+     */
+    private EventConfig parseEventConfig(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof Map<?, ?>)) {
+            throw new AwsException("BadRequestException", "eventConfig must be an object", 400);
+        }
+        EventConfig config;
+        try {
+            config = objectMapper.convertValue(value, EventConfig.class);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("BadRequestException", "Invalid eventConfig: " + e.getMessage(), 400);
+        }
+        if (config.getAuthProviders() == null || config.getConnectionAuthModes() == null
+                || config.getDefaultPublishAuthModes() == null || config.getDefaultSubscribeAuthModes() == null) {
+            throw new AwsException("BadRequestException", "eventConfig requires authProviders, connectionAuthModes,"
+                    + " defaultPublishAuthModes and defaultSubscribeAuthModes", 400);
+        }
+        Set<String> providerTypes = new HashSet<>();
+        for (AuthProvider provider : config.getAuthProviders()) {
+            if (provider == null || provider.getAuthType() == null) {
+                throw new AwsException("BadRequestException", "Every auth provider requires an authType", 400);
+            }
+            parseEnum(AuthenticationType.class, provider.getAuthType());
+            if (!providerTypes.add(provider.getAuthType())) {
+                throw new AwsException("BadRequestException",
+                        "Duplicate auth provider: " + provider.getAuthType(), 400);
+            }
+        }
+        List<AuthMode> modes = new ArrayList<>();
+        modes.addAll(config.getConnectionAuthModes());
+        modes.addAll(config.getDefaultPublishAuthModes());
+        modes.addAll(config.getDefaultSubscribeAuthModes());
+        for (AuthMode mode : modes) {
+            if (mode == null || mode.getAuthType() == null || !providerTypes.contains(mode.getAuthType())) {
+                throw new AwsException("BadRequestException", "Auth mode "
+                        + (mode == null ? null : mode.getAuthType())
+                        + " is not configured as an auth provider of this API", 400);
+            }
+        }
+        return config;
+    }
+
+    /**
+     * The Event API's DNS names. AWS hands out bare hostnames ({@code <id>.appsync-api.<region>...})
+     * that a client appends {@code /event} and {@code /event/realtime} to. Floci serves everything on
+     * one host, so the names carry the API's own path instead: a client that appends the AWS
+     * suffixes lands under {@code /v2/apis/<id>/}. Derived from the base URL on every read, so a
+     * changed base URL does not leave stale names behind.
+     */
+    private Map<String, String> eventApiDns(String apiId) {
+        String authority = baseUrl.replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "");
+        String name = authority + "/v2/apis/" + apiId;
+        Map<String, String> dns = new HashMap<>();
+        dns.put("HTTP", name);
+        dns.put("REALTIME", name);
+        return dns;
+    }
+
+    private EventApi refreshEventApiDns(EventApi api) {
+        Map<String, String> expected = eventApiDns(api.getApiId());
+        if (!expected.equals(api.getDns())) {
+            api.setDns(expected);
+            eventApiStore.put(api.getApiId(), api);
+        }
+        return api;
+    }
+
     // ──────────────────────────── Channel Namespaces ────────────────────────────
 
     public ChannelNamespace createChannelNamespace(String apiId, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
-        GraphqlApi api = getGraphqlApi(apiId);
+        String parentRegion = channelNamespaceParentRegion(apiId);
         String name = (String) request.get("name");
         if (name == null || name.isBlank()) {
             throw new AwsException("BadRequestException", "A channel namespace name is required", 400);
@@ -841,9 +1011,16 @@ public class AppSyncService {
         ns.setName(name);
         ns.setApiId(apiId);
         ns.setDescription((String) request.get("description"));
-        ns.setChannelNamespaceArn(regionResolver.buildArn("appsync", apiRegion(api),
+        ns.setChannelNamespaceArn(regionResolver.buildArn("appsync", parentRegion,
             "apis/" + apiId + "/channelNamespaces/" + name));
         ns.setCodeHandlers((String) request.get("codeHandlers"));
+        ns.setHandlerConfigs(convertMember(request.get("handlerConfigs"), new TypeReference<HandlerConfigs>() {}, "handlerConfigs"));
+        ns.setPublishAuthModes(convertMember(request.get("publishAuthModes"), new TypeReference<List<AuthMode>>() {}, "publishAuthModes"));
+        ns.setSubscribeAuthModes(convertMember(request.get("subscribeAuthModes"), new TypeReference<List<AuthMode>>() {}, "subscribeAuthModes"));
+        Map<String, String> nsTags = castStringMap(request.get("tags"));
+        if (nsTags != null) {
+            ns.setTags(new HashMap<>(nsTags));
+        }
         ns.setCreated(System.currentTimeMillis());
         ns.setLastModified(System.currentTimeMillis());
         channelNamespaceStore.put(nsKey, ns);
@@ -861,6 +1038,19 @@ public class AppSyncService {
         ChannelNamespace existing = getChannelNamespace(apiId, name);
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
         if (request.containsKey("codeHandlers")) existing.setCodeHandlers((String) request.get("codeHandlers"));
+        if (request.containsKey("handlerConfigs")) {
+            existing.setHandlerConfigs(convertMember(request.get("handlerConfigs"), new TypeReference<HandlerConfigs>() {}, "handlerConfigs"));
+        }
+        if (request.containsKey("publishAuthModes")) {
+            existing.setPublishAuthModes(convertMember(request.get("publishAuthModes"), new TypeReference<List<AuthMode>>() {}, "publishAuthModes"));
+        }
+        if (request.containsKey("subscribeAuthModes")) {
+            existing.setSubscribeAuthModes(convertMember(request.get("subscribeAuthModes"), new TypeReference<List<AuthMode>>() {}, "subscribeAuthModes"));
+        }
+        if (request.containsKey("tags")) {
+            Map<String, String> nsTags = castStringMap(request.get("tags"));
+            existing.setTags(nsTags == null ? null : new HashMap<>(nsTags));
+        }
         existing.setLastModified(System.currentTimeMillis());
         channelNamespaceStore.put(apiKey(apiId, name), existing);
         return existing;
@@ -870,6 +1060,34 @@ public class AppSyncService {
         assertSchemaNotBusy(apiId);
         getChannelNamespace(apiId, name);
         channelNamespaceStore.delete(apiKey(apiId, name));
+    }
+
+    /**
+     * The region a new namespace's ARN takes: its API's. Channel namespaces belong to Event APIs;
+     * one under a GraphQL API is still accepted, as it was before Event APIs existed here. An
+     * unknown id is a NotFoundException, as on AWS.
+     */
+    private String channelNamespaceParentRegion(String apiId) {
+        Optional<EventApi> eventApi = eventApiStore.get(apiId);
+        if (eventApi.isPresent()) {
+            return regionOfArn(eventApi.get().getApiArn());
+        }
+        Optional<GraphqlApi> graphqlApi = apiStore.get(apiId);
+        if (graphqlApi.isPresent()) {
+            return regionOfArn(graphqlApi.get().getArn());
+        }
+        throw new AwsException("NotFoundException", "API not found: " + apiId, 404);
+    }
+
+    private <T> T convertMember(Object value, TypeReference<T> type, String member) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return objectMapper.convertValue(value, type);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("BadRequestException", "Invalid " + member + ": " + e.getMessage(), 400);
+        }
     }
 
     public Page<ChannelNamespace> listChannelNamespaces(String apiId, Integer maxResults, String nextToken) {
@@ -1168,8 +1386,12 @@ public class AppSyncService {
 
     /** The region of an API's ARN, where its child resources live; the request region if it has none. */
     private String apiRegion(GraphqlApi api) {
-        if (api.getArn() != null && AwsArnUtils.isArn(api.getArn())) {
-            return AwsArnUtils.parse(api.getArn()).region();
+        return regionOfArn(api.getArn());
+    }
+
+    private String regionOfArn(String arn) {
+        if (arn != null && AwsArnUtils.isArn(arn)) {
+            return AwsArnUtils.parse(arn).region();
         }
         return regionResolver.getRegion();
     }

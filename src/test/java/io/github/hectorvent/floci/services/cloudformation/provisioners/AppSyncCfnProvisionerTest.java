@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.model.ApiKey;
+import io.github.hectorvent.floci.services.appsync.model.ChannelNamespace;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
+import io.github.hectorvent.floci.services.appsync.model.EventApi;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import io.github.hectorvent.floci.services.appsync.model.Resolver;
@@ -704,10 +706,187 @@ class AppSyncCfnProvisionerTest {
     }
 
     @Test
-    void resourceTypesCoverTheSixAppSyncTypes() {
+    void resourceTypesCoverTheGraphqlAndEventApiTypes() {
         assertEquals(Set.of("AWS::AppSync::GraphQLApi", "AWS::AppSync::GraphQLSchema",
                         "AWS::AppSync::DataSource", "AWS::AppSync::FunctionConfiguration",
-                        "AWS::AppSync::Resolver", "AWS::AppSync::ApiKey"),
+                        "AWS::AppSync::Resolver", "AWS::AppSync::ApiKey",
+                        "AWS::AppSync::Api", "AWS::AppSync::ChannelNamespace"),
                 provisioner.resourceTypes());
+    }
+
+    // ── Event APIs ──────────────────────────────────────────────────────────
+
+    private static final String EVENT_API_ID = "eventapi000000000000000001";
+    private static final String EVENT_API_ARN = "arn:aws:appsync:eu-west-1:000000000000:apis/" + EVENT_API_ID;
+    private static final String NAMESPACE_ARN = EVENT_API_ARN + "/channelNamespaces/chat";
+
+    private EventApi eventApi() {
+        EventApi api = new EventApi();
+        api.setApiId(EVENT_API_ID);
+        api.setName("events");
+        api.setApiArn(EVENT_API_ARN);
+        api.setDns(Map.of("HTTP", "localhost:4566/v2/apis/" + EVENT_API_ID,
+                "REALTIME", "localhost:4566/v2/apis/" + EVENT_API_ID));
+        return api;
+    }
+
+    private ChannelNamespace namespace() {
+        ChannelNamespace ns = new ChannelNamespace();
+        ns.setApiId(EVENT_API_ID);
+        ns.setName("chat");
+        ns.setChannelNamespaceArn(NAMESPACE_ARN);
+        return ns;
+    }
+
+    private JsonNode json(String text) {
+        try {
+            return mapper.readTree(text);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    @Test
+    void eventApiIsRefByArnWithTheSchemaGetAttAttributes() {
+        when(appSync.createApi(any(), eq("eu-west-1"))).thenReturn(eventApi());
+        StackResource r = resource("AWS::AppSync::Api", "EventApi");
+
+        provisioner.provision(r, json("""
+                {"Name": "events", "OwnerContact": "team",
+                 "EventConfig": {
+                   "AuthProviders": [{"AuthType": "AMAZON_COGNITO_USER_POOLS",
+                                      "CognitoConfig": {"UserPoolId": "pool", "AwsRegion": "eu-west-1"}}],
+                   "ConnectionAuthModes": [{"AuthType": "AMAZON_COGNITO_USER_POOLS"}],
+                   "DefaultPublishAuthModes": [{"AuthType": "AMAZON_COGNITO_USER_POOLS"}],
+                   "DefaultSubscribeAuthModes": [{"AuthType": "AMAZON_COGNITO_USER_POOLS"}],
+                   "LogConfig": {"LogLevel": "ALL", "CloudWatchLogsRoleArn": "role"}},
+                 "Tags": [{"Key": "env", "Value": "dev"}]}
+                """), ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).createApi(captor.capture(), eq("eu-west-1"));
+        Map<String, Object> req = captor.getValue();
+        assertEquals("events", req.get("name"));
+        assertEquals("team", req.get("ownerContact"));
+        assertEquals(Map.of("env", "dev"), req.get("tags"));
+        assertEquals(Map.of(
+                "authProviders", List.of(Map.of("authType", "AMAZON_COGNITO_USER_POOLS",
+                        "cognitoConfig", Map.of("userPoolId", "pool", "awsRegion", "eu-west-1"))),
+                "connectionAuthModes", List.of(Map.of("authType", "AMAZON_COGNITO_USER_POOLS")),
+                "defaultPublishAuthModes", List.of(Map.of("authType", "AMAZON_COGNITO_USER_POOLS")),
+                "defaultSubscribeAuthModes", List.of(Map.of("authType", "AMAZON_COGNITO_USER_POOLS")),
+                "logConfig", Map.of("logLevel", "ALL", "cloudWatchLogsRoleArn", "role")), req.get("eventConfig"));
+
+        assertEquals(EVENT_API_ARN, r.getPhysicalId());
+        assertEquals(EVENT_API_ID, r.getAttributes().get("ApiId"));
+        assertEquals(EVENT_API_ARN, r.getAttributes().get("ApiArn"));
+        assertEquals("localhost:4566/v2/apis/" + EVENT_API_ID, r.getAttributes().get("Dns.Http"));
+        assertEquals("localhost:4566/v2/apis/" + EVENT_API_ID, r.getAttributes().get("Dns.Realtime"));
+    }
+
+    @Test
+    void eventApiUpdateGoesThroughUpdateApiAndReconcilesTags() {
+        EventApi existing = eventApi();
+        existing.setTags(Map.of("old", "1", "env", "test"));
+        when(appSync.updateApi(eq(EVENT_API_ID), any())).thenReturn(existing);
+        when(appSync.getApi(EVENT_API_ID)).thenReturn(eventApi());
+        StackResource r = resource("AWS::AppSync::Api", "EventApi");
+        r.getAttributes().put("ApiId", EVENT_API_ID);
+
+        provisioner.provision(r, json("""
+                {"Name": "renamed", "Tags": [{"Key": "env", "Value": "prod"}]}
+                """), updateCtx(EVENT_API_ARN));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateApi(eq(EVENT_API_ID), captor.capture());
+        assertEquals("renamed", captor.getValue().get("name"));
+        // Dropped from the template, so sent as null to clear it.
+        assertTrue(captor.getValue().containsKey("eventConfig"));
+        assertNull(captor.getValue().get("eventConfig"));
+        assertFalse(captor.getValue().containsKey("tags"));
+        verify(appSync).untagResource(EVENT_API_ARN, List.of("old"));
+        verify(appSync).tagResource(EVENT_API_ARN, Map.of("env", "prod"));
+        verify(appSync, never()).createApi(any(), anyString());
+        assertEquals(EVENT_API_ARN, r.getPhysicalId());
+    }
+
+    @Test
+    void channelNamespaceTranslatesHandlerConfigsAndIsRefByArn() {
+        when(appSync.createChannelNamespace(eq(EVENT_API_ID), any())).thenReturn(namespace());
+        StackResource r = resource("AWS::AppSync::ChannelNamespace", "Chat");
+
+        provisioner.provision(r, json("""
+                {"ApiId": "%s", "Name": "chat", "CodeHandlers": "export function onPublish(ctx) {}",
+                 "PublishAuthModes": [{"AuthType": "API_KEY"}],
+                 "SubscribeAuthModes": [{"AuthType": "AWS_IAM"}],
+                 "HandlerConfigs": {"OnPublish": {"Behavior": "DIRECT",
+                   "Integration": {"DataSourceName": "fn", "LambdaConfig": {"InvokeType": "EVENT"}}}},
+                 "Tags": [{"Key": "team", "Value": "a"}]}
+                """.formatted(EVENT_API_ID)), ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).createChannelNamespace(eq(EVENT_API_ID), captor.capture());
+        Map<String, Object> req = captor.getValue();
+        assertFalse(req.containsKey("apiId"));
+        assertEquals("chat", req.get("name"));
+        assertEquals("export function onPublish(ctx) {}", req.get("codeHandlers"));
+        assertEquals(List.of(Map.of("authType", "API_KEY")), req.get("publishAuthModes"));
+        assertEquals(List.of(Map.of("authType", "AWS_IAM")), req.get("subscribeAuthModes"));
+        assertEquals(Map.of("onPublish", Map.of("behavior", "DIRECT", "integration",
+                Map.of("dataSourceName", "fn", "lambdaConfig", Map.of("invokeType", "EVENT")))),
+                req.get("handlerConfigs"));
+        assertEquals(Map.of("team", "a"), req.get("tags"));
+
+        assertEquals(NAMESPACE_ARN, r.getPhysicalId());
+        assertEquals(NAMESPACE_ARN, r.getAttributes().get("ChannelNamespaceArn"));
+        assertEquals(EVENT_API_ID, r.getAttributes().get("ApiId"));
+    }
+
+    @Test
+    void channelNamespaceUpdateInPlaceClearsDroppedProperties() {
+        when(appSync.updateChannelNamespace(eq(EVENT_API_ID), eq("chat"), any())).thenReturn(namespace());
+        StackResource r = resource("AWS::AppSync::ChannelNamespace", "Chat");
+        r.getAttributes().put("ApiId", EVENT_API_ID);
+        r.getAttributes().put("Name", "chat");
+
+        provisioner.provision(r, json("""
+                {"ApiId": "%s", "Name": "chat"}
+                """.formatted(EVENT_API_ID)), updateCtx(NAMESPACE_ARN));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateChannelNamespace(eq(EVENT_API_ID), eq("chat"), captor.capture());
+        Map<String, Object> req = captor.getValue();
+        for (String member : List.of("codeHandlers", "handlerConfigs", "publishAuthModes", "subscribeAuthModes")) {
+            assertTrue(req.containsKey(member), member);
+            assertNull(req.get(member), member);
+        }
+        assertEquals(Map.of(), req.get("tags"));
+        verify(appSync, never()).createChannelNamespace(anyString(), any());
+    }
+
+    @Test
+    void channelNamespaceRequiresApiId() {
+        StackResource r = resource("AWS::AppSync::ChannelNamespace", "Chat");
+        assertThrows(AwsException.class, () -> provisioner.provision(r, json("{\"Name\": \"chat\"}"), ctx()));
+        verifyNoInteractions(appSync);
+    }
+
+    @Test
+    void eventApiAndNamespaceDeleteFromTheArnAloneAndTolerateNotFound() {
+        StackResource api = resource("AWS::AppSync::Api", "EventApi");
+        api.setPhysicalId(EVENT_API_ARN);
+        StackResource ns = resource("AWS::AppSync::ChannelNamespace", "Chat");
+        ns.setPhysicalId(NAMESPACE_ARN);
+        doThrow(new AwsException("NotFoundException", "gone", 404)).when(appSync).deleteApi(EVENT_API_ID);
+
+        provisioner.delete(ns, "eu-west-1");
+        provisioner.delete(api, "eu-west-1");
+
+        verify(appSync).deleteChannelNamespace(EVENT_API_ID, "chat");
+        verify(appSync).deleteApi(EVENT_API_ID);
     }
 }

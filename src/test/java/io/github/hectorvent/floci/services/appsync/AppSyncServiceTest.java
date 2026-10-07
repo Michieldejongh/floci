@@ -14,7 +14,9 @@ import io.github.hectorvent.floci.services.appsync.graphql.auth.LambdaAuthorizer
 import io.github.hectorvent.floci.services.appsync.graphql.auth.LambdaAuthorizerResult;
 import io.github.hectorvent.floci.services.appsync.model.ApiKey;
 import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
+import io.github.hectorvent.floci.services.appsync.model.ChannelNamespace;
 import io.github.hectorvent.floci.services.appsync.model.DomainName;
+import io.github.hectorvent.floci.services.appsync.model.EventApi;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
@@ -376,6 +378,143 @@ class AppSyncServiceTest {
     private LambdaAuthorizerCache lambdaAuthorizerCache;
 
     @SuppressWarnings("unchecked")
+    // ── Event APIs ──────────────────────────────────────────────────────────
+
+    private static Map<String, Object> apiKeyEventConfig() {
+        List<Map<String, Object>> apiKey = List.of(Map.of("authType", "API_KEY"));
+        return Map.of(
+                "authProviders", apiKey,
+                "connectionAuthModes", apiKey,
+                "defaultPublishAuthModes", apiKey,
+                "defaultSubscribeAuthModes", apiKey,
+                "logConfig", Map.of("logLevel", "ERROR",
+                        "cloudWatchLogsRoleArn", "arn:aws:iam::000000000000:role/logs"));
+    }
+
+    @Test
+    void createApiReturnsTheEventApiShape() {
+        EventApi api = service.createApi(Map.of(
+                "name", "events",
+                "ownerContact", "team",
+                "eventConfig", apiKeyEventConfig(),
+                "tags", Map.of("env", "dev")), "us-east-1");
+
+        assertTrue(api.getApiId().matches("[0-9a-f]{26}"), api.getApiId());
+        assertEquals("arn:aws:appsync:us-east-1:000000000000:apis/" + api.getApiId(), api.getApiArn());
+        assertEquals("localhost:4566/v2/apis/" + api.getApiId(), api.getDns().get("HTTP"));
+        assertEquals("localhost:4566/v2/apis/" + api.getApiId(), api.getDns().get("REALTIME"));
+        assertEquals(NOW.getEpochSecond(), api.getCreated());
+        assertEquals("team", api.getOwnerContact());
+        assertEquals(Boolean.FALSE, api.getXrayEnabled());
+        assertEquals(Map.of("env", "dev"), api.getTags());
+        assertEquals("API_KEY", api.getEventConfig().getAuthProviders().get(0).getAuthType());
+        assertEquals("ERROR", api.getEventConfig().getLogConfig().getLogLevel());
+        assertEquals(api.getApiId(), service.getApi(api.getApiId()).getApiId());
+        assertEquals(1, service.listApis(null, null).items().size());
+    }
+
+    @Test
+    void anEventApiIsNotAGraphqlApi() {
+        EventApi api = service.createApi(Map.of("name", "events", "eventConfig", apiKeyEventConfig()), "us-east-1");
+
+        assertTrue(service.listGraphqlApis(null, null).items().isEmpty());
+        AwsException e = assertThrows(AwsException.class, () -> service.getGraphqlApi(api.getApiId()));
+        assertEquals("NotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void createApiRejectsAnAuthModeNoProviderConfigures() {
+        Map<String, Object> config = new HashMap<>(apiKeyEventConfig());
+        config.put("defaultPublishAuthModes", List.of(Map.of("authType", "AWS_IAM")));
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createApi(Map.of("name", "events", "eventConfig", config), "us-east-1"));
+        assertEquals("BadRequestException", e.getErrorCode());
+    }
+
+    @Test
+    void createApiRequiresAValidName() {
+        assertEquals("BadRequestException", assertThrows(AwsException.class,
+                () -> service.createApi(Map.of(), "us-east-1")).getErrorCode());
+        assertEquals("BadRequestException", assertThrows(AwsException.class,
+                () -> service.createApi(Map.of("name", "bad/name"), "us-east-1")).getErrorCode());
+    }
+
+    @Test
+    void updateApiReplacesNameAndEventConfigButKeepsTags() {
+        EventApi api = service.createApi(Map.of("name", "events", "eventConfig", apiKeyEventConfig(),
+                "tags", Map.of("env", "dev")), "us-east-1");
+        List<Map<String, Object>> iam = List.of(Map.of("authType", "AWS_IAM"));
+
+        EventApi updated = service.updateApi(api.getApiId(), Map.of("name", "renamed", "eventConfig", Map.of(
+                "authProviders", iam, "connectionAuthModes", iam,
+                "defaultPublishAuthModes", iam, "defaultSubscribeAuthModes", iam)));
+
+        assertEquals("renamed", updated.getName());
+        assertEquals("AWS_IAM", updated.getEventConfig().getConnectionAuthModes().get(0).getAuthType());
+        assertEquals(null, updated.getEventConfig().getLogConfig());
+        assertEquals(Map.of("env", "dev"), service.getApi(api.getApiId()).getTags());
+    }
+
+    @Test
+    void deleteApiRemovesItsChannelNamespaces() {
+        EventApi api = service.createApi(Map.of("name", "events", "eventConfig", apiKeyEventConfig()), "us-east-1");
+        service.createChannelNamespace(api.getApiId(), Map.of("name", "chat"));
+
+        service.deleteApi(api.getApiId());
+
+        assertEquals("NotFoundException", assertThrows(AwsException.class,
+                () -> service.getApi(api.getApiId())).getErrorCode());
+        assertTrue(service.listChannelNamespaces(api.getApiId(), null, null).items().isEmpty());
+    }
+
+    @Test
+    void channelNamespaceOnAnUnknownApiIsNotFound() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createChannelNamespace("nosuchapi0000000000000000000", Map.of("name", "chat")));
+        assertEquals("NotFoundException", e.getErrorCode());
+        assertEquals(404, e.getHttpStatus());
+    }
+
+    @Test
+    void channelNamespaceUnderAnEventApiKeepsHandlerConfigsAndAuthModes() {
+        EventApi api = service.createApi(Map.of("name", "events", "eventConfig", apiKeyEventConfig()), "eu-west-1");
+
+        ChannelNamespace ns = service.createChannelNamespace(api.getApiId(), Map.of(
+                "name", "chat",
+                "codeHandlers", "export function onPublish(ctx) { return ctx.events; }",
+                "publishAuthModes", List.of(Map.of("authType", "API_KEY")),
+                "subscribeAuthModes", List.of(Map.of("authType", "API_KEY")),
+                "handlerConfigs", Map.of("onPublish", Map.of("behavior", "DIRECT",
+                        "integration", Map.of("dataSourceName", "fn",
+                                "lambdaConfig", Map.of("invokeType", "EVENT")))),
+                "tags", Map.of("team", "a")));
+
+        assertEquals("arn:aws:appsync:eu-west-1:000000000000:apis/" + api.getApiId() + "/channelNamespaces/chat",
+                ns.getChannelNamespaceArn());
+        assertEquals("API_KEY", ns.getPublishAuthModes().get(0).getAuthType());
+        assertEquals("EVENT", ns.getHandlerConfigs().getOnPublish().getIntegration().getLambdaConfig().getInvokeType());
+        assertEquals("fn", ns.getHandlerConfigs().getOnPublish().getIntegration().getDataSourceName());
+        assertEquals(Map.of("team", "a"), ns.getTags());
+
+        Map<String, Object> clear = new HashMap<>();
+        clear.put("handlerConfigs", null);
+        clear.put("subscribeAuthModes", List.of(Map.of("authType", "AWS_IAM")));
+        ChannelNamespace updated = service.updateChannelNamespace(api.getApiId(), "chat", clear);
+        assertEquals(null, updated.getHandlerConfigs());
+        assertEquals("AWS_IAM", updated.getSubscribeAuthModes().get(0).getAuthType());
+    }
+
+    @Test
+    void anEventApiIsTaggedByItsArn() {
+        EventApi api = service.createApi(Map.of("name", "events", "eventConfig", apiKeyEventConfig()), "us-east-1");
+
+        service.tagResource(api.getApiArn(), Map.of("a", "1", "b", "2"));
+        service.untagResource(api.getApiArn(), List.of("a"));
+
+        assertEquals(Map.of("b", "2"), service.getTags(api.getApiArn()));
+    }
+
     private AppSyncService newService(Clock clock) {
         return newService(clock, "http://localhost:4566");
     }

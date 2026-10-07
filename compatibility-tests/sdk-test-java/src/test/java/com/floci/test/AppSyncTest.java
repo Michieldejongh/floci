@@ -1347,6 +1347,47 @@ class AppSyncTest {
         }
     }
 
+    // ── Event APIs ─────────────────────────────────────────────────────
+
+    @Test
+    @Order(150)
+    @DisplayName("Event API: CreateApi, GetApi, UpdateApi, ListApis, a namespace under it, DeleteApi")
+    void eventApiLifecycle() {
+        AuthMode apiKeyMode = AuthMode.builder().authType(AuthenticationType.API_KEY).build();
+        EventConfig eventConfig = EventConfig.builder()
+                .authProviders(AuthProvider.builder().authType(AuthenticationType.API_KEY).build())
+                .connectionAuthModes(apiKeyMode)
+                .defaultPublishAuthModes(apiKeyMode)
+                .defaultSubscribeAuthModes(apiKeyMode)
+                .build();
+
+        Api created = client.createApi(CreateApiRequest.builder()
+                .name("sdk-event-api")
+                .eventConfig(eventConfig)
+                .tags(Map.of("env", "dev"))
+                .build()).api();
+        String eventApiId = created.apiId();
+        try {
+            assertThat(created.apiArn()).endsWith(":apis/" + eventApiId);
+            assertThat(created.dns()).containsKeys("HTTP", "REALTIME");
+            assertThat(created.created()).isNotNull();
+            assertThat(created.eventConfig().authProviders().get(0).authType())
+                    .isEqualTo(AuthenticationType.API_KEY);
+
+            assertThat(client.getApi(r -> r.apiId(eventApiId)).api().name()).isEqualTo("sdk-event-api");
+            assertThat(client.updateApi(r -> r.apiId(eventApiId).name("sdk-event-api-2").eventConfig(eventConfig))
+                    .api().name()).isEqualTo("sdk-event-api-2");
+            assertThat(client.listApis(r -> { }).apis()).extracting(Api::apiId).contains(eventApiId);
+
+            ChannelNamespace ns = client.createChannelNamespace(r -> r.apiId(eventApiId).name("sdk-events")
+                    .publishAuthModes(apiKeyMode)).channelNamespace();
+            assertThat(ns.channelNamespaceArn()).isEqualTo(created.apiArn() + "/channelNamespaces/sdk-events");
+        } finally {
+            client.deleteApi(r -> r.apiId(eventApiId));
+        }
+        assertThatThrownBy(() -> client.getApi(r -> r.apiId(eventApiId))).isInstanceOf(NotFoundException.class);
+    }
+
     @Test
     @Order(200)
     void startSchemaCreation_syntaxError_throwsBadRequestWithExtendedBody() throws Exception {
