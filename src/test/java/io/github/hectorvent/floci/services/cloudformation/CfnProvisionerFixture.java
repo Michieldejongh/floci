@@ -89,6 +89,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaVer
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsLogStreamCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsMetricFilterCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.MemoryDbCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.PipesCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RdsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftClusterCfnProvisioner;
@@ -130,6 +131,7 @@ import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.memorydb.MemoryDbService;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
@@ -225,6 +227,7 @@ final class CfnProvisionerFixture {
         private BackupService backupService;
         private RedshiftService redshiftService;
         private RedshiftServerlessService redshiftServerlessService;
+        private MemoryDbService memoryDbService;
         private CloudMapService cloudMapService;
         private CloudFormationResourceRegistry resourceRegistry;
         private boolean registryChosenByTest;
@@ -447,6 +450,9 @@ final class CfnProvisionerFixture {
             if (redshiftServerlessService != null) {
                 discovered.add(new RedshiftServerlessCfnProvisioner(redshiftServerlessService));
             }
+            if (memoryDbService != null) {
+                discovered.add(new MemoryDbCfnProvisioner(memoryDbService));
+            }
             if (cloudMapService != null) {
                 discovered.add(new CloudMapCfnProvisioner(cloudMapService));
             }
@@ -490,6 +496,11 @@ final class CfnProvisionerFixture {
 
         public Builder kms(KmsService v) {
             this.kmsService = v;
+            return this;
+        }
+
+        public Builder memoryDb(MemoryDbService v) {
+            this.memoryDbService = v;
             return this;
         }
 

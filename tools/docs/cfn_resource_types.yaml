@@ -26,6 +26,7 @@ order:
   - AWS::RDS
   - AWS::Redshift
   - AWS::RedshiftServerless
+  - AWS::MemoryDB
   - AWS::EC2
   - AWS::ElasticLoadBalancingV2
   - AWS::AutoScaling
@@ -88,6 +89,7 @@ type_order:
     [Cluster, ClusterParameterGroup, ClusterSubnetGroup, ClusterSecurityGroup]
   AWS::RedshiftServerless:
     [Namespace, Workgroup]
+  AWS::MemoryDB: [User, ACL, SubnetGroup, ParameterGroup, Cluster]
   AWS::EC2:
     [VPC, Subnet, SecurityGroup, SecurityGroupIngress, SecurityGroupEgress, InternetGateway,
      RouteTable, SubnetRouteTableAssociation, Route, NatGateway, EIP, Instance, LaunchTemplate,
@@ -137,6 +139,7 @@ service_labels:
   AWS::KinesisFirehose: Kinesis Data Firehose
   AWS::Lambda: Lambda
   AWS::Logs: CloudWatch Logs
+  AWS::MemoryDB: MemoryDB
   AWS::Organizations: Organizations
   AWS::Pipes: Pipes
   AWS::RDS: RDS
@@ -170,6 +173,9 @@ notes:
   AWS::RedshiftServerless::Namespace: 'ManageAdminPassword is accepted and not applied; GetAtt uses the dotted Namespace.* form'
   AWS::RedshiftServerless::Workgroup: 'starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form'
   AWS::CDK::Metadata: accepted; no-op
+  AWS::MemoryDB::Cluster: 'starts a real container like CreateCluster; GetAtt uses the dotted ClusterEndpoint.* form; only Description updates in place; subnet, security group, KMS, parameter group and snapshot settings are accepted and ignored'
+  AWS::MemoryDB::SubnetGroup: accepted; name and ARN only, no subnet group model
+  AWS::MemoryDB::ParameterGroup: accepted; name and ARN only, parameters not applied
   AWS::Transfer::Server: 'management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported'
   AWS::Transfer::User: 'management plane only; Ref returns the user ARN; Arn attribute supported; Policy and PosixProfile are not supported; a ServerId or UserName change replaces the user'
   AWS::IAM::User: 'template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete'
