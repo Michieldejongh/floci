@@ -161,6 +161,13 @@ public class AppSyncService {
         return api;
     }
 
+    /** API keys and data sources belong to either kind of API; both share the apiId namespace. */
+    private void requireGraphqlOrEventApi(String apiId) {
+        if (apiStore.get(apiId).isEmpty() && eventApiStore.get(apiId).isEmpty()) {
+            throw new AwsException("NotFoundException", "API not found: " + apiId, 404);
+        }
+    }
+
     public GraphqlApi getGraphqlApi(String apiId) {
         return apiStore.get(apiId)
                 .map(this::refreshGraphqlApiUris)
@@ -314,7 +321,7 @@ public class AppSyncService {
 
     public DataSource createDataSource(String apiId, Map<String, Object> request, String region) {
         assertSchemaNotBusy(apiId);
-        getGraphqlApi(apiId);
+        requireGraphqlOrEventApi(apiId);
         String name = (String) request.get("name");
         if (name == null || name.isBlank()) {
             throw new AwsException("BadRequestException", "A data source name is required", 400);
@@ -624,7 +631,7 @@ public class AppSyncService {
     // ──────────────────────────── API Keys ────────────────────────────
 
     public ApiKey createApiKey(String apiId, Map<String, Object> request) {
-        getGraphqlApi(apiId);
+        requireGraphqlOrEventApi(apiId);
         long existingCount = apiKeyStore.scan(k -> k.startsWith(apiId + "::")).size();
         if (existingCount >= 2) {
             throw new AwsException("ApiKeyLimitExceededException",
@@ -904,6 +911,8 @@ public class AppSyncService {
         getApi(apiId);
         eventApiStore.delete(apiId);
         deleteChannelNamespacesForApi(apiId);
+        deleteDataSourcesForApi(apiId);
+        deleteApiKeysForApi(apiId);
         LOG.infov("Deleted Event API {0}", apiId);
     }
 

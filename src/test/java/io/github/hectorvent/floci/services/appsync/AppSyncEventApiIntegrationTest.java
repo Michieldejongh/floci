@@ -108,6 +108,38 @@ class AppSyncEventApiIntegrationTest {
     }
 
     @Test
+    void anEventApiTakesApiKeysAndDataSources() {
+        String apiId = given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("{\"name\": \"events-keys-it\", \"eventConfig\": " + EVENT_CONFIG + "}")
+            .when()
+                .post("/v2/apis")
+            .then()
+                .statusCode(200)
+                .extract().path("api.apiId");
+
+        given().header("Authorization", AUTH).contentType("application/json")
+                .body("{\"description\": \"bench\"}")
+            .when().post("/v1/apis/" + apiId + "/apikeys")
+            .then().statusCode(200)
+                .body("apiKey.id", notNullValue());
+
+        given().header("Authorization", AUTH).contentType("application/json")
+                .body("{\"name\": \"none_ds\", \"type\": \"NONE\"}")
+            .when().post("/v1/apis/" + apiId + "/datasources")
+            .then().statusCode(200)
+                .body("dataSource.name", equalTo("none_ds"));
+
+        given().header("Authorization", AUTH).when().delete("/v2/apis/" + apiId).then().statusCode(204);
+
+        given().header("Authorization", AUTH).contentType("application/json")
+                .body("{\"description\": \"gone\"}")
+            .when().post("/v1/apis/" + apiId + "/apikeys")
+            .then().statusCode(404);
+    }
+
+    @Test
     void channelNamespaceOnAnUnknownApiIsNotFound() {
         given()
                 .header("Authorization", AUTH)
