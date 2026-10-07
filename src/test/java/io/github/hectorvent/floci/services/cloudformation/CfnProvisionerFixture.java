@@ -22,12 +22,17 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2Instan
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaMicrovmsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.OrganizationsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.StepFunctionsCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.SesCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SqsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.WafV2CfnProvisioner;
 import io.github.hectorvent.floci.services.configservice.AwsConfigService;
 import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
+import io.github.hectorvent.floci.services.ses.SesConfigurationSetService;
+import io.github.hectorvent.floci.services.ses.SesDedicatedIpService;
+import io.github.hectorvent.floci.services.ses.SesIdentityService;
+import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.transfer.TransferService;
 import io.github.hectorvent.floci.services.wafv2.WafV2Service;
@@ -226,6 +231,11 @@ final class CfnProvisionerFixture {
         private RedshiftService redshiftService;
         private RedshiftServerlessService redshiftServerlessService;
         private CloudMapService cloudMapService;
+        // SES is one AWS service over several domain services; the facade names it, the rest come along.
+        private SesService sesService;
+        private SesConfigurationSetService sesConfigurationSetService;
+        private SesIdentityService sesIdentityService;
+        private SesDedicatedIpService sesDedicatedIpService;
         private CloudFormationResourceRegistry resourceRegistry;
         private boolean registryChosenByTest;
         private CfnDynamicReferences dynamicReferences;
@@ -450,7 +460,31 @@ final class CfnProvisionerFixture {
             if (cloudMapService != null) {
                 discovered.add(new CloudMapCfnProvisioner(cloudMapService));
             }
+            if (sesService != null) {
+                discovered.add(new SesCfnProvisioner(sesService, sesConfigurationSetService,
+                        sesIdentityService, sesDedicatedIpService));
+            }
             return discovered;
+        }
+
+        public Builder ses(SesService v) {
+            this.sesService = v;
+            return this;
+        }
+
+        public Builder sesConfigurationSets(SesConfigurationSetService v) {
+            this.sesConfigurationSetService = v;
+            return this;
+        }
+
+        public Builder sesIdentities(SesIdentityService v) {
+            this.sesIdentityService = v;
+            return this;
+        }
+
+        public Builder sesDedicatedIps(SesDedicatedIpService v) {
+            this.sesDedicatedIpService = v;
+            return this;
         }
 
         public Builder s3(S3Service v) {

@@ -13,6 +13,7 @@ order:
   - AWS::S3
   - AWS::SQS
   - AWS::SNS
+  - AWS::SES
   - AWS::DynamoDB
   - AWS::Lambda
   - AWS::IAM
@@ -74,6 +75,7 @@ type_order:
   AWS::S3: [Bucket, BucketPolicy]
   AWS::SQS: [Queue, QueuePolicy]
   AWS::SNS: [Topic, Subscription]
+  AWS::SES: [ConfigurationSet, ConfigurationSetEventDestination, EmailIdentity, DedicatedIpPool]
   AWS::DynamoDB: [Table, GlobalTable]
   AWS::Lambda: [Function, LayerVersion, EventSourceMapping, Version, Alias, Permission]
   AWS::IAM: [Role, User, AccessKey, Policy, ManagedPolicy, InstanceProfile]
@@ -144,6 +146,7 @@ service_labels:
   AWS::RedshiftServerless: Redshift Serverless
   AWS::Route53: Route 53
   AWS::S3: S3
+  AWS::SES: SES
   AWS::SNS: SNS
   AWS::SQS: SQS
   AWS::SSM: SSM
