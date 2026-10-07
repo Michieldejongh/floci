@@ -23,6 +23,7 @@ order:
   - AWS::ECR
   - AWS::ECS
   - AWS::EKS
+  - AWS::EFS
   - AWS::RDS
   - AWS::Redshift
   - AWS::RedshiftServerless
@@ -82,6 +83,7 @@ type_order:
   AWS::SecretsManager: [Secret, SecretTargetAttachment]
   AWS::ECS: [Cluster, TaskDefinition, Service]
   AWS::EKS: [Cluster, Nodegroup]
+  AWS::EFS: [FileSystem, MountTarget, AccessPoint]
   AWS::RDS:
     [DBInstance, DBCluster, DBSubnetGroup, DBParameterGroup, DBClusterParameterGroup]
   AWS::Redshift:
@@ -127,6 +129,7 @@ service_labels:
   AWS::EC2: EC2
   AWS::ECR: ECR
   AWS::ECS: ECS
+  AWS::EFS: EFS
   AWS::EKS: EKS
   AWS::ElasticLoadBalancingV2: Elastic Load Balancing v2
   AWS::Events: EventBridge

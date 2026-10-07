@@ -81,6 +81,9 @@ AWS::ECS::Cluster	EcsCfnProvisioner
 AWS::ECS::ClusterCapacityProviderAssociations	EcsCapacityCfnProvisioner
 AWS::ECS::Service	EcsCfnProvisioner
 AWS::ECS::TaskDefinition	EcsCfnProvisioner
+AWS::EFS::AccessPoint	EfsCfnProvisioner
+AWS::EFS::FileSystem	EfsCfnProvisioner
+AWS::EFS::MountTarget	EfsCfnProvisioner
 AWS::EKS::Cluster	EksCfnProvisioner
 AWS::EKS::Nodegroup	EksCfnProvisioner
 AWS::ElasticLoadBalancingV2::Listener	ElbV2CfnProvisioner

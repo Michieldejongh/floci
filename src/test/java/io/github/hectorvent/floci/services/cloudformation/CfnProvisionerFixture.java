@@ -64,6 +64,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2VpcCfn
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2VpcEndpointCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2VpcGatewayAttachmentCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcrCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.EfsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EksCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCapacityCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCfnProvisioner;
@@ -118,6 +119,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.NativeDynamoDbBacken
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.efs.EfsService;
 import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
@@ -223,6 +225,7 @@ final class CfnProvisionerFixture {
         private SqsService sqsService;
         private WafV2Service wafV2Service;
         private BackupService backupService;
+        private EfsService efsService;
         private RedshiftService redshiftService;
         private RedshiftServerlessService redshiftServerlessService;
         private CloudMapService cloudMapService;
@@ -399,6 +402,9 @@ final class CfnProvisionerFixture {
             }
             if (backupService != null) {
                 discovered.add(new BackupVaultCfnProvisioner(backupService));
+            }
+            if (efsService != null) {
+                discovered.add(new EfsCfnProvisioner(efsService));
             }
             if (eventBridgeService != null) {
                 discovered.add(new EventsCfnProvisioner(eventBridgeService));
@@ -700,6 +706,11 @@ final class CfnProvisionerFixture {
 
         public Builder backup(BackupService v) {
             this.backupService = v;
+            return this;
+        }
+
+        public Builder efs(EfsService v) {
+            this.efsService = v;
             return this;
         }
 
