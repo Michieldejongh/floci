@@ -115,6 +115,22 @@ class LambdaServiceTest {
     }
 
     @Test
+    void listVersionsByFunctionIsLatestFirstThenAscending() {
+        service.createFunction(REGION, baseRequest("many-versions-function"));
+        for (int i = 1; i <= 11; i++) {
+            service.updateFunctionConfiguration(REGION, "many-versions-function",
+                    Map.of("Description", "revision " + i));
+            service.publishVersion(REGION, "many-versions-function", null);
+        }
+
+        List<String> versions = service.listVersionsByFunction(REGION, "many-versions-function").stream()
+                .map(LambdaFunction::getVersion)
+                .toList();
+
+        assertEquals(List.of("$LATEST", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"), versions);
+    }
+
+    @Test
     void publishedVersionKeepsFileSystemConfigSnapshot() {
         Map<String, Object> request = baseRequest("versioned-efs-function");
         request.put("VpcConfig", vpcConfig());

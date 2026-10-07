@@ -53,6 +53,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -2865,7 +2866,23 @@ public class LambdaService implements ResourceProvider {
 
     public List<LambdaFunction> listVersionsByFunction(String region, String functionName) {
         LambdaFunction fn = getFunction(region, functionName); // verify function exists
-        return functionStore.listVersions(region, fn.getFunctionName());
+        // AWS lists $LATEST first, then the versions in ascending numeric order; clients such as the
+        // Terraform provider take the last entry as the newest version.
+        return functionStore.listVersions(region, fn.getFunctionName()).stream()
+                .sorted(Comparator.comparingLong(LambdaService::versionOrder))
+                .toList();
+    }
+
+    private static long versionOrder(LambdaFunction function) {
+        String version = function.getVersion();
+        if (version == null || "$LATEST".equals(version)) {
+            return -1;
+        }
+        try {
+            return Long.parseLong(version);
+        } catch (NumberFormatException e) {
+            return Long.MAX_VALUE;
+        }
     }
 
     /**
