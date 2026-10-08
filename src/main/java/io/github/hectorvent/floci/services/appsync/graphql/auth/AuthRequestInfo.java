@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.appsync.graphql.auth;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -16,7 +18,8 @@ public record AuthRequestInfo(
 ) {
     public AuthRequestInfo {
         sourceIp = sourceIp == null ? List.of() : List.copyOf(sourceIp);
-        variables = variables == null ? Map.of() : Map.copyOf(variables);
+        // GraphQL variables may be null-valued, which Map.copyOf rejects
+        variables = variables == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(variables));
         requestHeaders = requestHeaders == null ? Map.of() : Map.copyOf(requestHeaders);
         rawBody = rawBody == null ? "" : rawBody;
     }

@@ -181,6 +181,22 @@ class AppSyncExecutionControllerTest {
     }
 
     @Test
+    void nullValuedVariablesReachTheAuthorizer() {
+        GraphqlApi api = new GraphqlApi();
+        api.setApiId("api-1");
+        when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);
+        when(authMiddleware.authenticate(any(), any(), any())).thenThrow(AppSyncAuth.unauthorized());
+
+        Response response = controller.execute("api-1", jsonHeaders,
+                "{\"query\":\"mutation { hello }\",\"variables\":{\"ttl\":null,\"id\":\"1\"}}");
+
+        assertEquals(401, response.getStatus());
+        ArgumentCaptor<AuthRequestInfo> info = ArgumentCaptor.forClass(AuthRequestInfo.class);
+        verify(authMiddleware).authenticate(any(), any(), info.capture());
+        assertTrue(info.getValue().variables().containsKey("ttl"));
+    }
+
+    @Test
     void authFailureReturns401WithoutCallingSidecar() {
         GraphqlApi api = new GraphqlApi();
         api.setApiId("api-1");
