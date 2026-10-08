@@ -15,6 +15,18 @@ Like real MemoryDB, every cluster runs in cluster mode (`cluster-enabled yes`), 
 - Cluster-mode announce settings need a Valkey 8+ image (the default `valkey/valkey:8`); the flags are passed through the image's `VALKEY_EXTRA_FLAGS` hook.
 - TLS is not terminated: `TLSEnabled` is reported, but clients connect over plain TCP.
 
+## Persistence and Restarts
+
+With a persistent storage mode (`FLOCI_STORAGE_MODE=persistent`, `hybrid` or `wal`), clusters, users and ACLs survive a Floci restart, and so does each cluster's endpoint. On startup Floci brings every persisted cluster's data plane back:
+
+- The cluster keeps its `ClusterEndpoint` port. Its proxy port is reserved before Floci accepts requests, so a new `CreateCluster` cannot take it. The host is re-read from `FLOCI_HOSTNAME`.
+- The cluster reports `creating` while its container and auth proxy come back in the background, then `available`. Poll `DescribeClusters` (or use the SDK waiter) before connecting.
+- A Valkey container still running under the cluster's name is adopted, so its keys survive. Otherwise a new, empty container is started: Floci persists the cluster record, never the keyspace. A surviving container that announces a different endpoint (for example after `FLOCI_HOSTNAME` changed) is replaced by an empty one.
+- The single shard is formed again when its slots are not assigned, so `CLUSTER INFO` reports `cluster_state:ok` either way.
+- A cluster whose container or proxy cannot be brought back reports `restore-failed` with no endpoint, and the reason is logged. Floci's own startup does not fail. Its port is released, and the next start retries the cluster on the first free port, so its endpoint may change.
+
+By default Floci removes MemoryDB containers when it shuts down cleanly, so after a normal restart the clusters come back empty. Set `FLOCI_SERVICES_MEMORYDB_KEEP_RUNNING_ON_SHUTDOWN=true` to leave them running for the next start to adopt with their data. Only use it with a persistent storage mode: with in-memory storage nothing restores the clusters, and their containers are left behind until a cluster with the same name is created again or they are removed by hand.
+
 ## Mock Mode
 
 Set `FLOCI_SERVICES_MEMORYDB_MOCK=true` to manage clusters as control-plane-only resources — no Redis container is started. The management API (`CreateCluster`, `DescribeClusters`, tagging, etc.) behaves normally and returns a `ClusterEndpoint` of `<hostname>:6379` (defaults to `localhost:6379`, controlled by `FLOCI_HOSTNAME`), but there is no live data plane to connect to. This is intended for Infrastructure-as-Code tools like Terraform and OpenTofu running in environments without a Docker socket, where you only need the AWS resources to exist and return consistent attributes.
@@ -48,6 +60,7 @@ Set `FLOCI_SERVICES_MEMORYDB_MOCK=true` to manage clusters as control-plane-only
 | `FLOCI_SERVICES_MEMORYDB_PROXY_BASE_PORT` | `6400` | First host port in the MemoryDB proxy range |
 | `FLOCI_SERVICES_MEMORYDB_PROXY_MAX_PORT` | `6419` | Last host port in the MemoryDB proxy range |
 | `FLOCI_SERVICES_MEMORYDB_DEFAULT_IMAGE` | `valkey/valkey:8` | Docker image for Redis/Valkey containers |
+| `FLOCI_SERVICES_MEMORYDB_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave cluster containers running when Floci shuts down, so the next start adopts them with their data (see [Persistence and Restarts](#persistence-and-restarts)) |
 
 ### Docker Compose
 

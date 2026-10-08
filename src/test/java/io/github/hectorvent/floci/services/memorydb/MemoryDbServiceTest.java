@@ -20,14 +20,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -36,7 +39,9 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -53,6 +58,9 @@ class MemoryDbServiceTest {
     private SigV4Validator sigV4Validator;
     private ValkeyClusterFormation clusterFormation;
     private EmulatorConfig.MemoryDbServiceConfig mdbConfig;
+    private StorageFactory storageFactory;
+    private EmulatorConfig config;
+    private RegionResolver regionResolver;
 
     @BeforeEach
     void setUp() {
@@ -60,9 +68,9 @@ class MemoryDbServiceTest {
         proxyManager = mock(MemoryDbProxyManager.class);
         sigV4Validator = mock(SigV4Validator.class);
         clusterFormation = mock(ValkeyClusterFormation.class);
-        StorageFactory storageFactory = mock(StorageFactory.class);
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        RegionResolver regionResolver = mock(RegionResolver.class);
+        storageFactory = mock(StorageFactory.class);
+        config = mock(EmulatorConfig.class);
+        regionResolver = mock(RegionResolver.class);
 
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
         mdbConfig = mock(EmulatorConfig.MemoryDbServiceConfig.class);
@@ -77,7 +85,11 @@ class MemoryDbServiceTest {
                 AwsArnUtils.Arn.of(inv.getArgument(0), inv.getArgument(1),
                         "000000000000", inv.getArgument(2)).toString());
 
-        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        // One store per file, shared by every service built from this factory, so a second
+        // service stands in for Floci restarted on the same persisted state.
+        Map<String, AccountAwareStorageBackend<Object>> stores = new HashMap<>();
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> stores.computeIfAbsent(
+                inv.getArgument(1), file -> AccountAwareStorageBackend.inMemory("000000000000")));
         when(containerManager.tryStart(anyString(), anyString(), anyList()))
                 .thenReturn(new MemoryDbContainerHandle("cid", "cluster", "localhost", 6379));
         doNothing().when(proxyManager).startProxy(anyString(), anyBoolean(), anyInt(), anyString(), anyInt(), any());
@@ -590,5 +602,199 @@ class MemoryDbServiceTest {
         // Delete must not reach for a container that was never created.
         service.deleteCluster("no-docker-cluster");
         verify(containerManager, never()).stop(any());
+    }
+
+    // ──────────────────────────── Restore after restart ────────────────────────────
+
+    private MemoryDbService restartedService() {
+        clearInvocations(containerManager, proxyManager, clusterFormation);
+        return new MemoryDbService(containerManager, proxyManager, sigV4Validator, clusterFormation,
+                storageFactory, config, regionResolver);
+    }
+
+    private MemoryDbContainerHandle restoredHandle() {
+        return new MemoryDbContainerHandle("restored-cid", "persisted", "10.0.0.5", 6379);
+    }
+
+    @Test
+    void restoreAdoptsTheBackendAndStartsTheProxyOnTheRecordedPort() {
+        Cluster created = service.createCluster(cluster("persisted", "open-access"), "us-east-1");
+        int port = created.getClusterEndpoint().port();
+        MemoryDbService restarted = restartedService();
+        when(containerManager.tryAdoptOrStart(eq("persisted"), anyString(), anyList())).thenReturn(restoredHandle());
+        when(clusterFormation.isFormed("10.0.0.5", 6379)).thenReturn(true);
+
+        restarted.restorePersistedRuntime().join();
+
+        Cluster restored = restarted.getCluster("persisted", "us-east-1");
+        assertEquals(ClusterStatus.AVAILABLE, restored.getStatus());
+        assertEquals(port, restored.getClusterEndpoint().port());
+        assertEquals("restored-cid", restored.getContainerId());
+        verify(containerManager).tryAdoptOrStart(eq("persisted"), eq("valkey/valkey:8"),
+                eq(ValkeyClusterFormation.nodeFlags("localhost",
+                        ValkeyClusterFormation.resolveAnnounceIp("localhost"), port)));
+        verify(clusterFormation).awaitOk("persisted", "10.0.0.5", 6379);
+        verify(proxyManager).startProxy(eq("persisted"), eq(false), eq(port), eq("10.0.0.5"), eq(6379), any());
+    }
+
+    @Test
+    void restoreFormsTheClusterWhenTheBackendCameBackEmpty() {
+        service.createCluster(cluster("persisted", "open-access"), "us-east-1");
+        MemoryDbService restarted = restartedService();
+        when(containerManager.tryAdoptOrStart(anyString(), anyString(), anyList())).thenReturn(restoredHandle());
+        when(clusterFormation.isFormed("10.0.0.5", 6379)).thenReturn(false);
+
+        restarted.restorePersistedRuntime().join();
+
+        InOrder order = inOrder(clusterFormation, proxyManager);
+        order.verify(clusterFormation).form(eq("persisted"), eq(List.of(new ValkeyClusterFormation.Node(
+                "10.0.0.5", 6379, "10.0.0.5", 0, true))), eq(1));
+        order.verify(proxyManager).startProxy(eq("persisted"), anyBoolean(), anyInt(), eq("10.0.0.5"), eq(6379), any());
+        verify(clusterFormation, never()).awaitOk(anyString(), anyString(), anyInt());
+    }
+
+    @Test
+    void restoreKeepsAProtectedClusterBehindAuthentication() {
+        User user = new User();
+        user.setName("app-user");
+        user.setAuthMode(AuthMode.PASSWORD);
+        user.setPasswords(List.of("s3cret"));
+        user.setAccessString("on ~* +@all");
+        service.createUser(user, "us-east-1");
+        Acl acl = new Acl();
+        acl.setName("app-acl");
+        acl.setUserNames(List.of("default", "app-user"));
+        service.createAcl(acl, "us-east-1");
+        service.createCluster(cluster("secure", "app-acl"), "us-east-1");
+        MemoryDbService restarted = restartedService();
+        when(containerManager.tryAdoptOrStart(anyString(), anyString(), anyList())).thenReturn(restoredHandle());
+
+        restarted.restorePersistedRuntime().join();
+
+        verify(proxyManager).startProxy(eq("secure"), eq(true), anyInt(), anyString(), anyInt(), any());
+        assertTrue(restarted.authenticate("secure", "app-user", "s3cret", "us-east-1"));
+    }
+
+    @Test
+    void failedRestoreReportsRestoreFailedTearsDownAndFreesThePort() {
+        Cluster created = service.createCluster(cluster("broken", "open-access"), "us-east-1");
+        int port = created.getClusterEndpoint().port();
+        MemoryDbService restarted = restartedService();
+        when(containerManager.tryAdoptOrStart(anyString(), anyString(), anyList())).thenReturn(restoredHandle());
+        doThrow(new RuntimeException("Failed to start proxy for cluster broken on port " + port))
+                .when(proxyManager).startProxy(eq("broken"), anyBoolean(), anyInt(), anyString(), anyInt(), any());
+
+        restarted.restorePersistedRuntime().join();
+
+        Cluster failed = restarted.getCluster("broken", "us-east-1");
+        assertEquals(ClusterStatus.RESTORE_FAILED, failed.getStatus());
+        assertEquals("restore-failed", failed.getStatus().wireValue());
+        assertNull(failed.getClusterEndpoint());
+        verify(containerManager).stopByClusterName("broken");
+        Cluster next = restarted.createCluster(cluster("next", "open-access"), "us-east-1");
+        assertEquals(port, next.getClusterEndpoint().port(), "the failed cluster's port is free again");
+    }
+
+    @Test
+    void restoreFailedClusterIsRetriedOnTheNextStart() {
+        service.createCluster(cluster("flaky", "open-access"), "us-east-1");
+        MemoryDbService firstRestart = restartedService();
+        when(containerManager.tryAdoptOrStart(anyString(), anyString(), anyList()))
+                .thenThrow(new RuntimeException("container did not become ready"));
+        firstRestart.restorePersistedRuntime().join();
+        assertEquals(ClusterStatus.RESTORE_FAILED, firstRestart.getCluster("flaky", "us-east-1").getStatus());
+
+        MemoryDbService secondRestart = restartedService();
+        doReturn(restoredHandle()).when(containerManager).tryAdoptOrStart(anyString(), anyString(), anyList());
+        secondRestart.restorePersistedRuntime().join();
+
+        Cluster restored = secondRestart.getCluster("flaky", "us-east-1");
+        assertEquals(ClusterStatus.AVAILABLE, restored.getStatus());
+        assertEquals(16400, restored.getClusterEndpoint().port());
+    }
+
+    @Test
+    void restoreReservesPortsBeforeTheBackgroundWorkSoACreateCannotTakeThem() throws InterruptedException {
+        Cluster created = service.createCluster(cluster("persisted", "open-access"), "us-east-1");
+        int port = created.getClusterEndpoint().port();
+        MemoryDbService restarted = restartedService();
+        CountDownLatch release = new CountDownLatch(1);
+        when(containerManager.tryAdoptOrStart(anyString(), anyString(), anyList())).thenAnswer(inv -> {
+            release.await(10, TimeUnit.SECONDS);
+            return restoredHandle();
+        });
+
+        CompletableFuture<Void> restore = restarted.restorePersistedRuntime();
+        try {
+            assertEquals(ClusterStatus.CREATING, restarted.getCluster("persisted", "us-east-1").getStatus());
+            Cluster other = restarted.createCluster(cluster("other", "open-access"), "us-east-1");
+            assertTrue(other.getClusterEndpoint().port() != port, "a create must not take a restoring cluster's port");
+        } finally {
+            release.countDown();
+        }
+        restore.join();
+        assertEquals(port, restarted.getCluster("persisted", "us-east-1").getClusterEndpoint().port());
+    }
+
+    @Test
+    void clusterDeletedWhileRestoringIsNotResurrected() {
+        service.createCluster(cluster("doomed", "open-access"), "us-east-1");
+        MemoryDbService restarted = restartedService();
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryDbContainerHandle handle = restoredHandle();
+        when(containerManager.tryAdoptOrStart(anyString(), anyString(), anyList())).thenAnswer(inv -> {
+            release.await(10, TimeUnit.SECONDS);
+            return handle;
+        });
+
+        CompletableFuture<Void> restore = restarted.restorePersistedRuntime();
+        restarted.deleteCluster("doomed", "us-east-1");
+        release.countDown();
+        restore.join();
+
+        assertThrows(AwsException.class, () -> restarted.getCluster("doomed", "us-east-1"));
+        verify(containerManager).stopByClusterName("doomed");
+        verify(containerManager).stop(handle);
+    }
+
+    @Test
+    void restoreDoesNothingInMockMode() {
+        when(mdbConfig.mock()).thenReturn(true);
+        service.createCluster(cluster("mocked", "open-access"), "us-east-1");
+        MemoryDbService restarted = restartedService();
+
+        restarted.restorePersistedRuntime().join();
+
+        assertEquals(ClusterStatus.AVAILABLE, restarted.getCluster("mocked", "us-east-1").getStatus());
+        verifyNoInteractions(containerManager, proxyManager, clusterFormation);
+    }
+
+    @Test
+    void clusterCreatedInMockModeIsLeftAloneWhenMockModeIsOff() {
+        when(mdbConfig.mock()).thenReturn(true);
+        service.createCluster(cluster("mocked", "open-access"), "us-east-1");
+        when(mdbConfig.mock()).thenReturn(false);
+        MemoryDbService restarted = restartedService();
+
+        restarted.restorePersistedRuntime().join();
+
+        Cluster cluster = restarted.getCluster("mocked", "us-east-1");
+        assertEquals(ClusterStatus.AVAILABLE, cluster.getStatus());
+        assertEquals(6379, cluster.getClusterEndpoint().port());
+        verify(containerManager, never()).tryAdoptOrStart(anyString(), anyString(), anyList());
+    }
+
+    @Test
+    void restoreWithoutDockerDaemonStillReachesAvailable() {
+        service.createCluster(cluster("no-docker", "open-access"), "us-east-1");
+        MemoryDbService restarted = restartedService();
+        when(containerManager.tryAdoptOrStart(anyString(), anyString(), anyList())).thenReturn(null);
+
+        restarted.restorePersistedRuntime().join();
+
+        Cluster restored = restarted.getCluster("no-docker", "us-east-1");
+        assertEquals(ClusterStatus.AVAILABLE, restored.getStatus());
+        assertNull(restored.getContainerId());
+        verify(proxyManager, never()).startProxy(eq("no-docker"), anyBoolean(), anyInt(), anyString(), anyInt(), any());
     }
 }

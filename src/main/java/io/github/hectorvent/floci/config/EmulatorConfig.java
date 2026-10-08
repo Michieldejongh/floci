@@ -1563,6 +1563,13 @@ public interface EmulatorConfig {
 
         /** Docker network to attach MemoryDB containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+
+        /**
+         * Leave cluster containers running when Floci shuts down, so a restart with persistent
+         * storage adopts them with their data instead of starting empty ones.
+         */
+        @WithDefault("false")
+        boolean keepRunningOnShutdown();
     }
 
     interface RedshiftServiceConfig {

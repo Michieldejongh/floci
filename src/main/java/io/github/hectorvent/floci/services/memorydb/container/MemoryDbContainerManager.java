@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.memorydb.container;
 
+import com.github.dockerjava.api.model.Container;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -24,6 +25,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -36,6 +39,7 @@ public class MemoryDbContainerManager {
 
     private static final Logger LOG = Logger.getLogger(MemoryDbContainerManager.class);
     private static final int BACKEND_PORT = 6379;
+    private static final String VALKEY_EXTRA_FLAGS = "VALKEY_EXTRA_FLAGS";
 
     private static final int BACKEND_READY_DEADLINE_MS = 60_000;
     private static final int BACKEND_READY_RETRY_MS = 100;
@@ -101,6 +105,64 @@ public class MemoryDbContainerManager {
     }
 
     /**
+     * {@link #tryStart(String, String, List)} for a cluster restored after a Floci restart: a
+     * container still there under the cluster's name (Floci restarted but Docker did not) is
+     * adopted, started again if it had stopped, so its keyspace survives. A container created
+     * with different server flags announces a stale endpoint, so it is replaced by a fresh, empty
+     * one, as is a survivor that cannot be adopted.
+     *
+     * @return the container handle, or {@code null} when no Docker daemon is reachable
+     */
+    public MemoryDbContainerHandle tryAdoptOrStart(String clusterName, String image, List<String> extraServerFlags) {
+        String containerName = containerName(clusterName);
+        Optional<Container> existing = lifecycleManager.findByName(containerName);
+        if (existing.isPresent()) {
+            String containerId = existing.get().getId();
+            if (createdWithFlags(containerId, extraServerFlags)) {
+                try {
+                    return adopt(clusterName, containerId);
+                } catch (RuntimeException e) {
+                    LOG.warnv("Could not adopt container {0} for MemoryDB cluster {1}, starting an empty "
+                            + "one instead: {2}", containerName, clusterName, e.getMessage());
+                }
+            } else {
+                LOG.warnv("Container {0} for MemoryDB cluster {1} announces a different endpoint than "
+                        + "the cluster now has; replacing it with an empty one", containerName, clusterName);
+            }
+        }
+        return tryStart(clusterName, image, extraServerFlags);
+    }
+
+    /**
+     * Whether the container was created with these server flags. An environment Docker would not
+     * report counts as a match: replacing the container destroys its data, so that is done only
+     * on a known mismatch.
+     */
+    private boolean createdWithFlags(String containerId, List<String> extraServerFlags) {
+        Optional<List<String>> env = lifecycleManager.containerEnv(containerId);
+        if (env.isEmpty()) {
+            return true;
+        }
+        String expected = extraServerFlags.isEmpty()
+                ? null
+                : VALKEY_EXTRA_FLAGS + "=" + String.join(" ", extraServerFlags);
+        String actual = env.get().stream()
+                .filter(entry -> entry.startsWith(VALKEY_EXTRA_FLAGS + "="))
+                .findFirst()
+                .orElse(null);
+        return Objects.equals(expected, actual);
+    }
+
+    private MemoryDbContainerHandle adopt(String clusterName, String containerId) {
+        ContainerInfo info = lifecycleManager.adopt(containerId, List.of(BACKEND_PORT));
+        EndpointInfo endpoint = info.getEndpoint(BACKEND_PORT);
+        LOG.infov("Adopted MemoryDB backend container for cluster {0}: {1}", clusterName, endpoint);
+        MemoryDbContainerHandle handle = registerHandle(clusterName, info.containerId(), endpoint);
+        waitForBackendReady(clusterName, endpoint.host(), endpoint.port());
+        return handle;
+    }
+
+    /**
      * Probes the configured Docker endpoint, which is how a missing daemon is told apart from a
      * container that failed for its own reasons.
      */
@@ -138,7 +200,7 @@ public class MemoryDbContainerManager {
                         "memorydb", clusterName, regionResolver.getAccountId(), resolvedRegion()));
 
         if (!extraServerFlags.isEmpty()) {
-            specBuilder.withEnv("VALKEY_EXTRA_FLAGS", String.join(" ", extraServerFlags));
+            specBuilder.withEnv(VALKEY_EXTRA_FLAGS, String.join(" ", extraServerFlags));
         }
 
         if (!containerDetector.isRunningInContainer()) {
@@ -154,23 +216,23 @@ public class MemoryDbContainerManager {
 
         LOG.infov("MemoryDB backend for cluster {0}: {1}", clusterName, endpoint);
 
+        MemoryDbContainerHandle handle = registerHandle(clusterName, info.containerId(), endpoint);
+        waitForBackendReady(clusterName, endpoint.host(), endpoint.port());
+        return handle;
+    }
+
+    private MemoryDbContainerHandle registerHandle(String clusterName, String containerId, EndpointInfo endpoint) {
         MemoryDbContainerHandle handle = new MemoryDbContainerHandle(
-                info.containerId(), clusterName, endpoint.host(), endpoint.port());
+                containerId, clusterName, endpoint.host(), endpoint.port());
         activeContainers.put(clusterName, handle);
 
-        String shortId = info.containerId().length() >= 8
-                ? info.containerId().substring(0, 8)
-                : info.containerId();
+        String shortId = containerId.length() >= 8 ? containerId.substring(0, 8) : containerId;
         String logGroup = "/aws/memorydb/cluster/" + clusterName + "/engine-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
-        String region = resolvedRegion();
 
         Closeable logHandle = logStreamer.attach(
-                info.containerId(), logGroup, logStream, region, "memorydb:" + clusterName);
+                containerId, logGroup, logStream, resolvedRegion(), "memorydb:" + clusterName);
         handle.setLogStream(logHandle);
-
-        waitForBackendReady(clusterName, endpoint.host(), endpoint.port());
-
         return handle;
     }
 
@@ -248,8 +310,25 @@ public class MemoryDbContainerManager {
         return region != null ? region : regionResolver.getDefaultRegion();
     }
 
+    /**
+     * Stops every cluster container on shutdown, unless {@code keep-running-on-shutdown} is set:
+     * then the containers are left running for the next start to adopt, and only their log
+     * streams are closed.
+     */
     public void stopAll() {
         List<MemoryDbContainerHandle> handles = new ArrayList<>(activeContainers.values());
+        if (config.services().memorydb().keepRunningOnShutdown()) {
+            if (!handles.isEmpty()) {
+                LOG.infov("Leaving {0} MemoryDB container(s) running on shutdown", handles.size());
+            }
+            for (MemoryDbContainerHandle handle : handles) {
+                activeContainers.remove(handle.getClusterName());
+                if (handle.getLogStream() != null) {
+                    lifecycleManager.closeLogStreamAfterContainerStop(handle.getLogStream());
+                }
+            }
+            return;
+        }
         if (!handles.isEmpty()) {
             LOG.infov("Stopping {0} MemoryDB container(s) on shutdown", handles.size());
         }

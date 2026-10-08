@@ -107,6 +107,32 @@ public class ValkeyClusterFormation {
     }
 
     /**
+     * Whether the node at {@code host:port} already has every slot assigned, as a node adopted
+     * after a Floci restart does: its {@code nodes.conf} survived with the container, and
+     * {@link #form} would fail on it because those slots are busy. An unreachable node counts as
+     * not formed, so the caller's {@code form} reports the failure.
+     */
+    public boolean isFormed(String host, int port) {
+        try (RespClient client = new RespClient(host, port)) {
+            String info = client.callString("CLUSTER", "INFO");
+            return info != null && parseInfoField(info, "cluster_slots_assigned") == TOTAL_SLOTS;
+        } catch (IOException e) {
+            LOG.debugv("Could not read CLUSTER INFO from {0}:{1}: {2}", host, String.valueOf(port), e.getMessage());
+            return false;
+        }
+    }
+
+    /** Waits until the already-formed node at {@code host:port} reports {@code cluster_state:ok}. */
+    public void awaitOk(String groupId, String host, int port) {
+        long deadline = System.currentTimeMillis() + FORMATION_DEADLINE_MS;
+        try (RespClient client = new RespClient(host, port)) {
+            awaitClusterOk(groupId, List.of(client), deadline);
+        } catch (IOException e) {
+            throw new RuntimeException("Cluster state check for group " + groupId + " failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
      * Server flags for a cluster-enabled node that clients reach through a Floci proxy.
      * Nodes announce the given hostname as their preferred endpoint, so MOVED/ASK redirects and
      * CLUSTER SLOTS/SHARDS/NODES hand clients the exact name Floci reports as the endpoint — how

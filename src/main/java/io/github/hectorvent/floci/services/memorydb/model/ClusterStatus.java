@@ -11,7 +11,9 @@ public enum ClusterStatus {
     CREATING("creating"),
     AVAILABLE("available"),
     UPDATING("updating"),
-    DELETING("deleting");
+    DELETING("deleting"),
+    /** Reported after a restart when the cluster's container or proxy could not be brought back. */
+    RESTORE_FAILED("restore-failed");
 
     private final String wireValue;
 

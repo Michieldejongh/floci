@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -60,9 +61,9 @@ public class MemoryDbService {
     private static final java.util.regex.Pattern USER_NAME_PATTERN =
             java.util.regex.Pattern.compile("[a-zA-Z][a-zA-Z0-9\\-]*");
 
-    private final StorageBackend<String, Cluster> clusters;
-    private final StorageBackend<String, User> users;
-    private final StorageBackend<String, Acl> acls;
+    private final AccountAwareStorageBackend<Cluster> clusters;
+    private final AccountAwareStorageBackend<User> users;
+    private final AccountAwareStorageBackend<Acl> acls;
     private final MemoryDbContainerManager containerManager;
     private final MemoryDbProxyManager proxyManager;
     private final SigV4Validator sigV4Validator;
@@ -71,6 +72,7 @@ public class MemoryDbService {
     private final RegionResolver regionResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final Set<String> provisioningClusterNames = ConcurrentHashMap.newKeySet();
+    private final Map<String, Object> clusterLocks = new ConcurrentHashMap<>();
 
     @Inject
     public MemoryDbService(MemoryDbContainerManager containerManager,
@@ -197,20 +199,280 @@ public class MemoryDbService {
 
     public Cluster deleteCluster(String name, String region) {
         Cluster cluster = getCluster(name, region);
-        cluster.setStatus(ClusterStatus.DELETING);
-        String identity = identityName(cluster.getAccountId(), region, name);
+        synchronized (lockFor(regionResolver.getAccountId(), key(region, name))) {
+            boolean restoring = cluster.getStatus() == ClusterStatus.CREATING;
+            cluster.setStatus(ClusterStatus.DELETING);
+            String identity = identityName(cluster.getAccountId(), region, name);
 
-        proxyManager.stopProxy(identity);
+            proxyManager.stopProxy(identity);
 
-        if (cluster.getContainerId() != null) {
-            containerManager.stop(new MemoryDbContainerHandle(
-                    cluster.getContainerId(), identity, cluster.getContainerHost(), cluster.getContainerPort()));
+            if (cluster.getContainerId() != null) {
+                containerManager.stop(new MemoryDbContainerHandle(
+                        cluster.getContainerId(), identity, cluster.getContainerHost(), cluster.getContainerPort()));
+            } else if (restoring) {
+                // A cluster still being restored has no container id yet; the restore discards
+                // whatever it starts once it sees the record gone, this catches one already up.
+                containerManager.stopByClusterName(identity);
+            }
+
+            releaseProxyPort(cluster.getProxyPort());
+            clusters.delete(key(region, name));
         }
-
-        releaseProxyPort(cluster.getProxyPort());
-        clusters.delete(key(region, name));
         LOG.infov("MemoryDB cluster {0} deleted", name);
         return cluster;
+    }
+
+    // ──────────────────────────── Restore after restart ────────────────────────────
+
+    /** A persisted cluster being restored, with the account and store key that own it. */
+    private record RestoreTarget(String accountId, String key, String region, Cluster cluster) {}
+
+    /**
+     * Brings the data plane back for every cluster restored from disk. Invoked from
+     * {@code EmulatorLifecycle} after {@code storageFactory.loadAll()}, as ElastiCache's restore
+     * is. Only the record is persisted; the auth proxy is process-local, so without this a
+     * cluster comes back {@code available} with nothing listening on its endpoint, and the port
+     * it advertises is free for the next create to take.
+     *
+     * <p>The proxy port each record carries is reserved synchronously, before any request can
+     * claim it, and the record is marked {@code creating}. The container and proxy work then runs
+     * in the background, so it does not delay emulator readiness: a container still running
+     * under the cluster's name is adopted with its keyspace, otherwise an empty one is started,
+     * the single-shard cluster is formed when its slots are not already assigned, and the proxy
+     * is started on the same port. A cluster whose data plane cannot come back is reported
+     * {@code restore-failed}; Floci's own startup never fails on it.
+     *
+     * <p>Mock mode has no data plane to restore, and clusters created in mock mode carry no proxy
+     * port, so both are left as they are.
+     */
+    public CompletableFuture<Void> restorePersistedRuntime() {
+        if (config.services().memorydb().mock()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        List<RestoreTarget> toRestore = new ArrayList<>();
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : clusters.scanAllAccountEntries(k -> true)) {
+            Cluster cluster = entry.value();
+            if (cluster.getName() == null || cluster.getStatus() == ClusterStatus.DELETING) {
+                continue;
+            }
+            if (cluster.getProxyPort() <= 0 && cluster.getStatus() != ClusterStatus.RESTORE_FAILED) {
+                continue;
+            }
+            RestoreTarget target = canonicalTarget(entry);
+            synchronized (lockFor(target.accountId(), target.key())) {
+                reserveCluster(target, toRestore);
+                clusters.putForAccount(target.accountId(), target.key(), cluster);
+            }
+        }
+        if (toRestore.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        LOG.infov("Restoring {0} MemoryDB cluster(s) in the background", String.valueOf(toRestore.size()));
+        return CompletableFuture.runAsync(() -> toRestore.forEach(this::restoreCluster));
+    }
+
+    /**
+     * Resolves the owner of a persisted record, moving one stored under a pre-region key to the
+     * {@code region:name} key requests use, so a delete and the restore lock the same record.
+     */
+    private RestoreTarget canonicalTarget(AccountAwareStorageBackend.AccountEntry<Cluster> entry) {
+        Cluster cluster = entry.value();
+        String region = cluster.getRegion();
+        if (region == null || region.isBlank()) {
+            int separator = entry.key().indexOf(':');
+            region = separator > 0 ? entry.key().substring(0, separator) : regionResolver.getDefaultRegion();
+            cluster.setRegion(region);
+        }
+        if (cluster.getAccountId() == null) {
+            cluster.setAccountId(entry.accountId());
+        }
+        String canonicalKey = key(region, cluster.getName());
+        if (!canonicalKey.equals(entry.key())) {
+            clusters.deleteForAccount(entry.accountId(), entry.key());
+        }
+        return new RestoreTarget(entry.accountId(), canonicalKey, region, cluster);
+    }
+
+    /**
+     * Reserves the proxy port a cluster comes back advertising and marks it {@code creating}. A
+     * port outside the configured range, or already taken by another record, is replaced by a
+     * fresh one, which changes that cluster's endpoint. The host is re-derived from configuration
+     * rather than replayed, so a changed {@code FLOCI_HOSTNAME} is honoured.
+     */
+    private void reserveCluster(RestoreTarget target, List<RestoreTarget> toRestore) {
+        Cluster cluster = target.cluster();
+        int previousPort = cluster.getProxyPort();
+        try {
+            int base = config.services().memorydb().proxyBasePort();
+            int max = config.services().memorydb().proxyMaxPort();
+            boolean keepPort = previousPort >= base && previousPort <= max && usedPorts.add(previousPort);
+            int proxyPort = keepPort ? previousPort : allocateProxyPort();
+            if (!keepPort && previousPort > 0) {
+                LOG.warnv("MemoryDB cluster {0} cannot keep proxy port {1}; its endpoint moves to port {2}",
+                        cluster.getName(), String.valueOf(previousPort), String.valueOf(proxyPort));
+            }
+            cluster.setProxyPort(proxyPort);
+            cluster.setClusterEndpoint(new Endpoint(resolveEndpointHost(), proxyPort));
+            cluster.setStatus(ClusterStatus.CREATING);
+            // Whatever the record carried describes the previous process's container; a delete
+            // taken during the restore must not act on it.
+            cluster.setContainerId(null);
+            cluster.setContainerHost(null);
+            cluster.setContainerPort(0);
+            toRestore.add(target);
+        } catch (RuntimeException e) {
+            markRestoreFailed(cluster);
+            LOG.warnv(e, "Failed to restore MemoryDB cluster {0}", cluster.getName());
+        }
+    }
+
+    /**
+     * Brings back the container and auth proxy behind one cluster. The container work runs
+     * outside the cluster's lock, so a restore that may pull an image does not hold a delete of
+     * the same cluster behind it; the write-back takes the lock and re-reads the record, because
+     * a delete taken meanwhile has already removed it.
+     */
+    private void restoreCluster(RestoreTarget target) {
+        Cluster cluster = target.cluster();
+        String name = cluster.getName();
+        String region = target.region();
+        String identity = identityName(target.accountId(), region, name);
+        int proxyPort = cluster.getProxyPort();
+        String endpointHost = cluster.getClusterEndpoint().address();
+        String image = config.services().memorydb().defaultImage();
+        try {
+            boolean authRequired = isAuthRequiredForAccount(target.accountId(), cluster.getAclName(), region);
+            MemoryDbContainerHandle handle = containerManager.tryAdoptOrStart(identity, image,
+                    ValkeyClusterFormation.nodeFlags(endpointHost,
+                            ValkeyClusterFormation.resolveAnnounceIp(endpointHost), proxyPort));
+            if (handle != null) {
+                if (clusterFormation.isFormed(handle.getHost(), handle.getPort())) {
+                    clusterFormation.awaitOk(identity, handle.getHost(), handle.getPort());
+                } else {
+                    clusterFormation.form(identity, List.of(new ValkeyClusterFormation.Node(
+                            handle.getHost(), handle.getPort(), handle.getHost(), 0, true)), 1);
+                }
+                proxyManager.startProxy(identity, authRequired, proxyPort, handle.getHost(), handle.getPort(),
+                        (username, secret) -> authenticate(name, username, secret, region));
+            } else {
+                LOG.warnv("MemoryDB cluster {0} restored without a backing container: no Docker daemon "
+                        + "is reachable. Metadata operations work; connections to the cluster do not "
+                        + "until a daemon appears.", name);
+            }
+            synchronized (lockFor(target.accountId(), target.key())) {
+                if (restoreTargetLost(target)) {
+                    abandonRestoredBackend(identity, handle);
+                    return;
+                }
+                cluster.setContainerId(handle != null ? handle.getContainerId() : null);
+                cluster.setContainerHost(handle != null ? handle.getHost() : null);
+                cluster.setContainerPort(handle != null ? handle.getPort() : 0);
+                cluster.setStatus(ClusterStatus.AVAILABLE);
+                clusters.putForAccount(target.accountId(), target.key(), cluster);
+            }
+            LOG.infov("Restored MemoryDB cluster {0}, endpoint={1}:{2}", name, endpointHost,
+                    String.valueOf(proxyPort));
+        } catch (RuntimeException e) {
+            failRestore(target, identity, e);
+        }
+    }
+
+    /** Whether the record a restore is about to write back is still there; callers hold its lock. */
+    private boolean restoreTargetLost(RestoreTarget target) {
+        return clusters.getForAccount(target.accountId(), target.key())
+                .map(current -> current.getStatus() == ClusterStatus.DELETING)
+                .orElse(true);
+    }
+
+    /**
+     * Drops what a restore started for a cluster deleted while it ran. The port is not released:
+     * the delete released it already, and a later create may hold it by now.
+     */
+    private void abandonRestoredBackend(String identity, MemoryDbContainerHandle handle) {
+        try {
+            proxyManager.stopProxy(identity);
+        } catch (RuntimeException e) {
+            LOG.warnv("Error stopping proxy for deleted MemoryDB cluster {0}: {1}", identity, e.getMessage());
+        }
+        if (handle != null) {
+            try {
+                containerManager.stop(handle);
+            } catch (RuntimeException e) {
+                LOG.warnv("Error stopping container for deleted MemoryDB cluster {0}: {1}", identity, e.getMessage());
+            }
+        }
+        LOG.infov("Discarded the restored data plane for MemoryDB cluster {0}: it was deleted while "
+                + "it was being restored", identity);
+    }
+
+    /**
+     * Reports a cluster whose data plane could not be brought back as {@code restore-failed}
+     * without deleting the record, tears down what the attempt left running and frees its port.
+     * The next start retries it on a fresh port.
+     */
+    private void failRestore(RestoreTarget target, String identity, RuntimeException cause) {
+        Cluster cluster = target.cluster();
+        synchronized (lockFor(target.accountId(), target.key())) {
+            try {
+                proxyManager.stopProxy(identity);
+            } catch (RuntimeException e) {
+                LOG.warnv("Error stopping proxy for MemoryDB cluster {0}: {1}", identity, e.getMessage());
+            }
+            try {
+                containerManager.stopByClusterName(identity);
+            } catch (RuntimeException e) {
+                LOG.warnv("Error stopping container for MemoryDB cluster {0}: {1}", identity, e.getMessage());
+            }
+            if (restoreTargetLost(target)) {
+                LOG.warnv(cause, "Failed to restore MemoryDB cluster {0}, which was deleted while it was "
+                        + "being restored", cluster.getName());
+                return;
+            }
+            releaseProxyPort(cluster.getProxyPort());
+            markRestoreFailed(cluster);
+            try {
+                clusters.putForAccount(target.accountId(), target.key(), cluster);
+            } catch (RuntimeException persistFailure) {
+                cause.addSuppressed(persistFailure);
+            }
+            LOG.warnv(cause, "Failed to restore MemoryDB cluster {0}", cluster.getName());
+        }
+    }
+
+    private void markRestoreFailed(Cluster cluster) {
+        cluster.setStatus(ClusterStatus.RESTORE_FAILED);
+        cluster.setClusterEndpoint(null);
+        cluster.setProxyPort(0);
+        cluster.setContainerId(null);
+        cluster.setContainerHost(null);
+        cluster.setContainerPort(0);
+    }
+
+    /**
+     * {@link #isAuthRequired} for a named account, as a restore runs outside any request. An ACL
+     * that cannot be found counts as requiring auth, so a restore never opens a protected cluster.
+     */
+    private boolean isAuthRequiredForAccount(String accountId, String aclName, String region) {
+        if (DEFAULT_ACL.equals(aclName)) {
+            return false;
+        }
+        Optional<Acl> acl = acls.getForAccount(accountId, key(region, aclName));
+        if (acl.isEmpty()) {
+            return true;
+        }
+        for (String userName : acl.get().getUserNames()) {
+            User user = DEFAULT_USER.equals(userName)
+                    ? builtinDefaultUser(region)
+                    : users.getForAccount(accountId, key(region, userName)).orElse(null);
+            if (user == null || user.getAuthMode() != AuthMode.NO_PASSWORD) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Object lockFor(String accountId, String clusterKey) {
+        return clusterLocks.computeIfAbsent(accountId + "/" + clusterKey, k -> new Object());
     }
 
     // ──────────────────────────── Users ────────────────────────────

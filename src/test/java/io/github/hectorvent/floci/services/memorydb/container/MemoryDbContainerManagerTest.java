@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.services.elasticache.container.ValkeyClusterFormation;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.model.Container;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -17,6 +18,8 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -28,12 +31,15 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MemoryDbContainerManagerTest {
 
     private static final Logger LOG = Logger.getLogger(MemoryDbContainerManagerTest.class);
+
+    private EmulatorConfig.MemoryDbServiceConfig memorydbConfig;
 
     @Test
     void stopByClusterNameRemovesByDeterministicNameWhenNothingRegistered() {
@@ -216,6 +222,109 @@ class MemoryDbContainerManagerTest {
         }
     }
 
+    private static final List<String> FLAGS = ValkeyClusterFormation.nodeFlags("localhost", "127.0.0.1", 6400);
+
+    private static ServerSocket pongServer() throws IOException {
+        ServerSocket serverSocket = new ServerSocket(0);
+        Thread responder = new Thread(() -> {
+            try (Socket socket = serverSocket.accept()) {
+                socket.getInputStream().read(new byte[64]);
+                OutputStream out = socket.getOutputStream();
+                out.write("+PONG\r\n".getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            } catch (IOException e) {
+                LOG.debugv(e, "Acceptor socket closed during test teardown");
+            }
+        });
+        responder.setDaemon(true);
+        responder.start();
+        return serverSocket;
+    }
+
+    private static Container existingContainer(String id) {
+        Container container = mock(Container.class);
+        when(container.getId()).thenReturn(id);
+        return container;
+    }
+
+    @Test
+    void tryAdoptOrStartAdoptsASurvivingContainerCreatedWithTheSameFlags() throws IOException {
+        try (ServerSocket serverSocket = pongServer()) {
+            ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+            Container survivor = existingContainer("survivor-id");
+            when(lifecycleManager.findByName("floci-aws-memorydb-cluster1")).thenReturn(Optional.of(survivor));
+            when(lifecycleManager.containerEnv("survivor-id")).thenReturn(Optional.of(List.of(
+                    "PATH=/usr/bin", "VALKEY_EXTRA_FLAGS=" + String.join(" ", FLAGS))));
+            when(lifecycleManager.adopt("survivor-id", List.of(6379))).thenReturn(
+                    new ContainerLifecycleManager.ContainerInfo("survivor-id", Map.of(6379,
+                            new ContainerLifecycleManager.EndpointInfo("127.0.0.1", serverSocket.getLocalPort()))));
+
+            MemoryDbContainerHandle handle = newManager(lifecycleManager)
+                    .tryAdoptOrStart("cluster1", "valkey/valkey:8", FLAGS);
+
+            assertEquals("survivor-id", handle.getContainerId());
+            assertEquals(serverSocket.getLocalPort(), handle.getPort());
+            verify(lifecycleManager, never()).removeIfExists(anyString());
+            verify(lifecycleManager, never()).createAndStart(any());
+        }
+    }
+
+    @Test
+    void tryAdoptOrStartReplacesASurvivorThatAnnouncesADifferentEndpoint() throws IOException {
+        try (ServerSocket serverSocket = pongServer()) {
+            ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+            Container survivor = existingContainer("survivor-id");
+            when(lifecycleManager.findByName("floci-aws-memorydb-cluster1")).thenReturn(Optional.of(survivor));
+            when(lifecycleManager.containerEnv("survivor-id")).thenReturn(Optional.of(List.of(
+                    "VALKEY_EXTRA_FLAGS=" + String.join(" ",
+                            ValkeyClusterFormation.nodeFlags("old-host", "127.0.0.1", 6400)))));
+            when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                    "fresh-id", Map.of(6379, new ContainerLifecycleManager.EndpointInfo(
+                            "127.0.0.1", serverSocket.getLocalPort()))));
+
+            MemoryDbContainerHandle handle = newManager(lifecycleManager)
+                    .tryAdoptOrStart("cluster1", "valkey/valkey:8", FLAGS);
+
+            assertEquals("fresh-id", handle.getContainerId());
+            verify(lifecycleManager, never()).adopt(anyString(), any());
+            verify(lifecycleManager).removeIfExists("floci-aws-memorydb-cluster1");
+        }
+    }
+
+    @Test
+    void tryAdoptOrStartStartsAFreshContainerWhenNoneSurvived() throws IOException {
+        try (ServerSocket serverSocket = pongServer()) {
+            ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+            when(lifecycleManager.findByName(anyString())).thenReturn(Optional.empty());
+            when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                    "fresh-id", Map.of(6379, new ContainerLifecycleManager.EndpointInfo(
+                            "127.0.0.1", serverSocket.getLocalPort()))));
+
+            MemoryDbContainerHandle handle = newManager(lifecycleManager)
+                    .tryAdoptOrStart("cluster1", "valkey/valkey:8", FLAGS);
+
+            assertEquals("fresh-id", handle.getContainerId());
+            verify(lifecycleManager, never()).adopt(anyString(), any());
+        }
+    }
+
+    @Test
+    void stopAllLeavesContainersRunningWhenKeepRunningOnShutdownIsSet() throws IOException {
+        try (ServerSocket serverSocket = pongServer()) {
+            ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+            when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                    "container-id", Map.of(6379, new ContainerLifecycleManager.EndpointInfo(
+                            "127.0.0.1", serverSocket.getLocalPort()))));
+            MemoryDbContainerManager manager = newManager(lifecycleManager);
+            when(memorydbConfig.keepRunningOnShutdown()).thenReturn(true);
+            manager.start("cluster1", "valkey/valkey:8");
+
+            manager.stopAll();
+
+            verify(lifecycleManager, never()).stopAndRemove(anyString(), any());
+        }
+    }
+
     private MemoryDbContainerManager newManager(ContainerLifecycleManager lifecycleManager) {
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
@@ -231,6 +340,7 @@ class MemoryDbContainerManagerTest {
         when(config.services()).thenReturn(services);
         when(services.memorydb()).thenReturn(memorydb);
         when(memorydb.dockerNetwork()).thenReturn(Optional.empty());
+        memorydbConfig = memorydb;
 
         return new MemoryDbContainerManager(containerBuilder, lifecycleManager, logStreamer,
                 mock(ContainerDetector.class), config, new RegionResolver("us-east-1", "000000000000"));

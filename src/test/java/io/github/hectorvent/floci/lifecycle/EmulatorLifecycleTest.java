@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentialsServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheMemcachedService;
+import io.github.hectorvent.floci.services.memorydb.MemoryDbService;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
@@ -92,6 +93,8 @@ class EmulatorLifecycleTest {
     @Mock private RdsProxyManager rdsProxyManager;
     @Mock private io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager memoryDbContainerManager;
     @Mock private io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager memoryDbProxyManager;
+    @Mock private MemoryDbService memoryDbService;
+    @Mock private EmulatorConfig.MemoryDbServiceConfig memoryDbServiceConfig;
     @Mock private DocDbContainerManager docDbContainerManager;
     @Mock private NeptuneContainerManager neptuneContainerManager;
     @Mock private NeptuneProxyManager neptuneProxyManager;
@@ -138,6 +141,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(elbv2ServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.elasticache()).thenReturn(elastiCacheServiceConfig);
         Mockito.lenient().when(elastiCacheServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.memorydb()).thenReturn(memoryDbServiceConfig);
+        Mockito.lenient().when(memoryDbServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.elb()).thenReturn(elbServiceConfig);
         Mockito.lenient().when(elbServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.lambda()).thenReturn(lambdaServiceConfig);
@@ -157,7 +162,7 @@ class EmulatorLifecycleTest {
                 iamService, elastiCacheService, elastiCacheMemcachedService,
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
-                memoryDbContainerManager, memoryDbProxyManager,
+                memoryDbContainerManager, memoryDbProxyManager, memoryDbService,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
                 rabbitMqManager, flinkContainerManager, rdsService, timestreamInfluxDbService,
                 elbV2Service, elbClassicService, ecsService,
@@ -326,6 +331,46 @@ class EmulatorLifecycleTest {
 
         Mockito.verify(elastiCacheService, Mockito.never()).restorePersistedRuntime();
         Mockito.verify(elastiCacheMemcachedService, Mockito.never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void restoresMemoryDbClustersAfterStorageLoadWhenMemoryDbIsEnabled() {
+        stubStorageConfig();
+        when(memoryDbServiceConfig.enabled()).thenReturn(true);
+        when(memoryDbService.restorePersistedRuntime()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, memoryDbService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(memoryDbService).restorePersistedRuntime();
+    }
+
+    @Test
+    void doesNotRestoreMemoryDbClustersWhenMemoryDbIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(memoryDbService, never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedMemoryDbRestoreDoesNotFailStartup() {
+        stubStorageConfig();
+        when(memoryDbServiceConfig.enabled()).thenReturn(true);
+        when(memoryDbService.restorePersistedRuntime())
+                .thenReturn(CompletableFuture.failedFuture(new RuntimeException("docker gone")));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(initLifecycleState).markReadyCompleted();
     }
 
     @Test

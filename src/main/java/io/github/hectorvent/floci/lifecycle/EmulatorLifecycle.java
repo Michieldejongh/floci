@@ -35,6 +35,7 @@ import io.github.hectorvent.floci.services.elb.ElbClassicService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
+import io.github.hectorvent.floci.services.memorydb.MemoryDbService;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
@@ -87,6 +88,7 @@ public class EmulatorLifecycle {
     private final RdsProxyManager rdsProxyManager;
     private final MemoryDbContainerManager memoryDbContainerManager;
     private final MemoryDbProxyManager memoryDbProxyManager;
+    private final MemoryDbService memoryDbService;
     private final DocDbContainerManager docDbContainerManager;
     private final NeptuneContainerManager neptuneContainerManager;
     private final NeptuneProxyManager neptuneProxyManager;
@@ -128,6 +130,7 @@ public class EmulatorLifecycle {
                              RdsProxyManager rdsProxyManager,
                              MemoryDbContainerManager memoryDbContainerManager,
                              MemoryDbProxyManager memoryDbProxyManager,
+                             MemoryDbService memoryDbService,
                              DocDbContainerManager docDbContainerManager,
                              NeptuneContainerManager neptuneContainerManager,
                              NeptuneProxyManager neptuneProxyManager,
@@ -168,6 +171,7 @@ public class EmulatorLifecycle {
         this.rdsProxyManager = rdsProxyManager;
         this.memoryDbContainerManager = memoryDbContainerManager;
         this.memoryDbProxyManager = memoryDbProxyManager;
+        this.memoryDbService = memoryDbService;
         this.docDbContainerManager = docDbContainerManager;
         this.neptuneContainerManager = neptuneContainerManager;
         this.neptuneProxyManager = neptuneProxyManager;
@@ -261,6 +265,12 @@ public class EmulatorLifecycle {
             });
             elastiCacheMemcachedService.restorePersistedRuntime().exceptionally(ex -> {
                 LOG.warnv("ElastiCache Memcached restore failed: {0}", ex.getMessage());
+                return null;
+            });
+        }
+        if (config.services().memorydb().enabled()) {
+            memoryDbService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.warnv("MemoryDB cluster restore failed: {0}", ex.getMessage());
                 return null;
             });
         }
