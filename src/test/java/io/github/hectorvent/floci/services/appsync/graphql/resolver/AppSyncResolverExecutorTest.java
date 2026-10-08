@@ -614,6 +614,30 @@ class AppSyncResolverExecutorTest {
     }
 
     @Test
+    void directLambdaResolverSendsTheWholeContextAndReturnsTheResult() {
+        when(appSync.getDataSource(API_ID, "accountFunction"))
+                .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
+        lambdaInvoker.answer = Map.of("name", "floci");
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountFunction");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of("id", "42")));
+
+        assertEquals(Map.of("name", "floci"), result.data());
+        assertTrue(result.errors().isEmpty());
+        assertTrue(jsRuntime.calls.isEmpty());
+        Map<?, ?> request = (Map<?, ?>) lambdaInvoker.requests.get(0);
+        assertEquals("Invoke", request.get("operation"));
+        Map<?, ?> event = (Map<?, ?>) request.get("payload");
+        assertEquals(Map.of("id", "42"), event.get("arguments"));
+        Map<?, ?> info = (Map<?, ?>) event.get("info");
+        assertEquals("getMessages", info.get("fieldName"));
+        assertEquals("Query", info.get("parentTypeName"));
+        assertTrue(event.containsKey("identity"));
+        assertTrue(event.containsKey("stash"));
+    }
+
+    @Test
     void vtlLambdaInvokeWithoutPayloadKeepsTheMemberAbsent() {
         when(appSync.getDataSource(API_ID, "accountFunction"))
                 .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));

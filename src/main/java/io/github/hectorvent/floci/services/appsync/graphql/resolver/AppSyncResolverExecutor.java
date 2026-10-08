@@ -198,6 +198,13 @@ public class AppSyncResolverExecutor {
             Stage stage = Stage.of(resolver);
             DataSource vtlDataSource = stage.vtl()
                     ? requireVtlDataSource(resolver.getDataSourceName(), "UNIT resolver") : null;
+            if (isDirectLambdaResolver(stage)) {
+                // A direct Lambda resolver: AppSync invokes the function with the whole context
+                // and returns its result as the field value.
+                Invocation direct = invokeDataSource(resolver.getDataSourceName(),
+                        Map.of("operation", "Invoke", "payload", directLambdaPayload()));
+                return result(callHandler(stage, RESPONSE, direct.result(), direct.error(), direct.result()));
+            }
             Object request = callHandler(stage, REQUEST, null, null, null);
             if (returned) {
                 return result(earlyReturnValue);
@@ -319,6 +326,29 @@ public class AppSyncResolverExecutor {
                 return new Invocation(request, null);
             }
             return invokeDataSource(dataSource(dataSourceName), request, false);
+        }
+
+        /** A UNIT resolver with neither code nor mapping templates over a Lambda data source. */
+        private boolean isDirectLambdaResolver(Stage stage) {
+            boolean hasCode = stage.code() != null && !stage.code().isBlank();
+            String dataSourceName = resolver.getDataSourceName();
+            return !hasCode && !stage.vtl() && dataSourceName != null && !dataSourceName.isBlank()
+                    && dataSource(dataSourceName).getType() == DataSourceType.AWS_LAMBDA;
+        }
+
+        /** The event AppSync sends a direct Lambda resolver. */
+        private Map<String, Object> directLambdaPayload() {
+            Map<String, Object> event = new LinkedHashMap<>();
+            event.put("arguments", invocation.arguments());
+            event.put("identity", invocation.identity());
+            event.put("source", invocation.source());
+            event.put("request", requestContext());
+            Map<String, Object> prev = new LinkedHashMap<>();
+            prev.put("result", previousResult);
+            event.put("prev", prev);
+            event.put("info", info());
+            event.put("stash", stash);
+            return event;
         }
 
         private DataSource dataSource(String dataSourceName) {
